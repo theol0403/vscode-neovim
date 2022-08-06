@@ -140,7 +140,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
 
             for (const change of changes) {
-                console.log(`${LOG_PREFIX}: Change: ${change.text}, range: ${JSON.stringify(change.range)}`);
                 const start = change.range.start;
                 const end = change.range.end;
                 requests.push([
@@ -166,7 +165,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         if (!requests.length) {
             return;
         }
-        console.log("requests", JSON.stringify(requests));
         await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     }
 
