@@ -130,9 +130,10 @@ export class TypingManager implements Disposable {
             this.logger.debug(`${LOG_PREFIX}: Syncing buffers with neovim (${key})`);
             await this.changeManager.syncDotRepeatWithNeovim();
             if (window.activeTextEditor) {
-                const requests: [string, unknown[]][] = [];
-                requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]]);
-                if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
+                const requests: [string, unknown[]][] = [
+                    ["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]],
+                ];
+                await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
             }
             const keys = normalizeInputString(this.pendingKeysAfterExit);
             this.logger.debug(`${LOG_PREFIX}: Pending keys sent with ${key}: ${keys}`);
