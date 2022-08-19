@@ -67,6 +67,12 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
      */
     private cursorAfterTextDocumentChange: WeakMap<TextDocument, { line: number; character: number }> = new WeakMap();
     /**
+     * Holds document content last known to neovim.
+     * ! This is used to convert vscode ranges to neovim bytes.
+     * ! It's possible to just fetch content from neovim and check instead of tracking here, but this will add unnecessary lag
+     */
+    private documentContentInNeovim: WeakMap<TextDocument, string> = new WeakMap();
+    /**
      * Dot repeat workaround
      */
     private dotRepeatChange: DotRepeatChange | undefined;
@@ -82,6 +88,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         private modeManager: ModeManager,
     ) {
         this.bufferManager.onBufferEvent = this.onNeovimChangeEvent;
+        this.bufferManager.onBufferInit = this.onBufferInit;
         this.disposables.push(workspace.onDidChangeTextDocument(this.onChangeTextDocument));
     }
 
@@ -165,6 +172,12 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         cleanEdits.push(["nvim_win_close", [win.id, true]]);
         await callAtomic(this.client, cleanEdits, this.logger, LOG_PREFIX);
     }
+
+    private onBufferInit: BufferManager["onBufferInit"] = (id, doc) => {
+        this.logger.debug(`${LOG_PREFIX}: Init buffer content for bufId: ${id}, uri: ${doc.uri.toString()}`);
+        this.documentContentInNeovim.set(doc, doc.getText());
+    };
+
     private onNeovimChangeEvent: BufferManager["onBufferEvent"] = (
         bufId,
         tick,
@@ -395,7 +408,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                             character: editor.selection.active.character,
                         });
                         docPromises.forEach((p) => p.resolve && p.resolve());
-                        this.logger.debug(`${LOG_PREFIX}: Changes succesfully applied for ${doc.uri.toString()}`);
+                        this.logger.debug(`${LOG_PREFIX}: Changes successfully applied for ${doc.uri.toString()}`);
+                        this.documentContentInNeovim.set(doc, doc.getText());
                     } else {
                         docPromises.forEach((p) => {
                             p.promise?.catch(() =>
@@ -427,19 +441,18 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     };
 
     private onChangeTextDocument = async (e: TextDocumentChangeEvent): Promise<void> => {
-        const { document, contentChanges } = e;
-        const doc = document;
+        const { document: doc, contentChanges } = e;
 
-        this.logger.debug(`${LOG_PREFIX}: Change text document for uri: ${document.uri.toString()}`);
-        if (this.documentSkipVersionOnChange.get(document) === document.version) {
+        this.logger.debug(`${LOG_PREFIX}: Change text document for uri: ${doc.uri.toString()}`);
+        if (this.documentSkipVersionOnChange.get(doc) === doc.version) {
             this.logger.debug(`${LOG_PREFIX}: Skipping a change since versions equals`);
             return;
         }
 
         // Store dot repeat
         const activeEditor = window.activeTextEditor;
-        if (activeEditor && activeEditor.document === document && this.modeManager.isInsertMode) {
-            const eol = document.eol === EndOfLine.LF ? "\n" : "\r\n";
+        if (activeEditor && activeEditor.document === doc && this.modeManager.isInsertMode) {
+            const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
             const cursor = activeEditor.selection.active;
             for (const change of contentChanges) {
                 if (isCursorChange(change, cursor, eol)) {
@@ -452,11 +465,19 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             }
         }
 
+        const origText = this.documentContentInNeovim.get(doc);
+        if (origText == null) {
+            this.logger.warn(`${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`);
+            return;
+        }
+
         const bufId = this.bufferManager.getBufferIdForTextDocument(doc);
         if (!bufId) {
             this.logger.warn(`${LOG_PREFIX}: No neovim buffer for ${doc.uri.toString()}`);
             return;
         }
+
+        this.documentContentInNeovim.set(doc, doc.getText());
 
         const requests: [string, unknown[]][] = [];
         const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
@@ -467,9 +488,9 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
             // vscode indexes by character, but neovim indexes by byte
             // count the number of bytes in the line to get the neovim index
-            const startText = doc.getText(new Range(start.line, 0, start.line, start.character));
+            const startText = origText.split(eol)[start.line].slice(0, start.character);
             const startBytes = Buffer.byteLength(startText, "utf8");
-            const endText = doc.getText(new Range(end.line, 0, end.line, end.character));
+            const endText = origText.split(eol)[end.line].slice(0, end.character);
             const endBytes = Buffer.byteLength(endText, "utf8");
 
             requests.push([
