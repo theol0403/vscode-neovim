@@ -464,9 +464,17 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         for (const change of contentChanges) {
             const start = change.range.start;
             const end = change.range.end;
+
+            // vscode indexes by character, but neovim indexes by byte
+            // count the number of bytes in the line to get the neovim index
+            const startText = doc.getText(new Range(start.line, 0, start.line, start.character));
+            const startBytes = Buffer.byteLength(startText, "utf8");
+            const endText = doc.getText(new Range(end.line, 0, end.line, end.character));
+            const endBytes = Buffer.byteLength(endText, "utf8");
+
             requests.push([
                 "nvim_buf_set_text",
-                [bufId, start.line, start.character, end.line, end.character, change.text.split(eol)],
+                [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
             ]);
         }
         const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
