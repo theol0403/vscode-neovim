@@ -12,6 +12,7 @@ import {
     window,
     workspace,
 } from "vscode";
+import { Mutex } from "async-mutex";
 
 import { BufferManager } from "./buffer_manager";
 import { Logger } from "./logger";
@@ -80,6 +81,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
      * True when we're currently applying edits, so incoming changes will go into pending events queue
      */
     private applyingEdits = false;
+    /**
+     * Lock edits being sent to neovim
+     */
+    private documentChangeLock: Mutex = new Mutex();
 
     public constructor(
         private logger: Logger,
@@ -441,6 +446,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     };
 
     private onChangeTextDocument = async (e: TextDocumentChangeEvent): Promise<void> => {
+        await this.documentChangeLock.runExclusive(async () => await this.onChangeTextDocumentLocked(e));
+    };
+
+    private onChangeTextDocumentLocked = async (e: TextDocumentChangeEvent): Promise<void> => {
         const { document: doc, contentChanges } = e;
 
         this.logger.debug(`${LOG_PREFIX}: Change text document for uri: ${doc.uri.toString()}`);
