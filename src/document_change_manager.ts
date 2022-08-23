@@ -9,10 +9,10 @@ import {
     Selection,
     TextDocument,
     TextDocumentChangeEvent,
+    TextDocumentContentChangeEvent,
     window,
     workspace,
 } from "vscode";
-import { Mutex } from "async-mutex";
 
 import { BufferManager } from "./buffer_manager";
 import { Logger } from "./logger";
@@ -26,6 +26,7 @@ import {
     diffLineToChars,
     DotRepeatChange,
     getDocumentLineArray,
+    getNeovimCursorPosFromEditor,
     isChangeSubsequentToChange,
     isCursorChange,
     normalizeDotRepeatChange,
@@ -74,6 +75,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
      */
     private documentContentInNeovim: WeakMap<TextDocument, string> = new WeakMap();
     /**
+     * Set of changed documents since last neovim sync
+     */
+    private changedDocuments: Map<TextDocument, Array<TextDocumentContentChangeEvent>> = new Map();
+    /**
      * Dot repeat workaround
      */
     private dotRepeatChange: DotRepeatChange | undefined;
@@ -81,10 +86,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
      * True when we're currently applying edits, so incoming changes will go into pending events queue
      */
     private applyingEdits = false;
-    /**
-     * Lock edits being sent to neovim
-     */
-    private documentChangeLock: Mutex = new Mutex();
 
     public constructor(
         private logger: Logger,
@@ -121,6 +122,72 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
     public async handleExtensionRequest(): Promise<void> {
         // skip
+    }
+
+    public async syncDocumentsWithNeovim(): Promise<void> {
+        this.logger.debug(`${LOG_PREFIX}: Syncing document changes with neovim`);
+
+        const requests: [string, unknown[]][] = [];
+        const changedDocs = [...this.changedDocuments];
+        this.changedDocuments.clear();
+
+        for (const [doc, changes] of changedDocs) {
+            this.logger.debug(`${LOG_PREFIX}: Processing document ${doc.uri.toString()}`);
+            if (doc.isClosed) {
+                this.logger.warn(`${LOG_PREFIX}: Document ${doc.uri.toString()} is closed, skipping`);
+                continue;
+            }
+            const origText = this.documentContentInNeovim.get(doc);
+            if (origText == null) {
+                this.logger.warn(
+                    `${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`,
+                );
+                continue;
+            }
+
+            const bufId = this.bufferManager.getBufferIdForTextDocument(doc);
+            if (!bufId) {
+                this.logger.warn(`${LOG_PREFIX}: No neovim buffer for ${doc.uri.toString()}`);
+                continue;
+            }
+
+            this.documentContentInNeovim.set(doc, doc.getText());
+
+            const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
+
+            for (const change of changes) {
+                const start = change.range.start;
+                const end = change.range.end;
+
+                // vscode indexes by character, but neovim indexes by byte
+                // count the number of bytes in the line to get the neovim index
+                const startText = origText.split(eol)[start.line].slice(0, start.character);
+                const startBytes = Buffer.byteLength(startText, "utf8");
+                const endText = origText.split(eol)[end.line].slice(0, end.character);
+                const endBytes = Buffer.byteLength(endText, "utf8");
+
+                requests.push([
+                    "nvim_buf_set_text",
+                    [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
+                ]);
+            }
+            const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
+            if (!bufTick) {
+                this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
+                continue;
+            }
+            this.logger.debug(
+                `${LOG_PREFIX}: BufId: ${bufId}, lineChanges: ${requests.length}, tick: ${bufTick}, skipTick: ${
+                    bufTick + requests.length
+                }`,
+            );
+            this.bufferSkipTicks.set(bufId, bufTick + requests.length);
+        }
+
+        if (window.activeTextEditor)
+            requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]]);
+
+        if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     }
 
     public async syncDotRepeatWithNeovim(): Promise<void> {
@@ -445,23 +512,20 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         this.applyingEdits = false;
     };
 
-    private onChangeTextDocument = async (e: TextDocumentChangeEvent): Promise<void> => {
-        await this.documentChangeLock.runExclusive(async () => await this.onChangeTextDocumentLocked(e));
-    };
+    private onChangeTextDocument = (e: TextDocumentChangeEvent): void => {
+        const { document, contentChanges } = e;
 
-    private onChangeTextDocumentLocked = async (e: TextDocumentChangeEvent): Promise<void> => {
-        const { document: doc, contentChanges } = e;
-
-        this.logger.debug(`${LOG_PREFIX}: Change text document for uri: ${doc.uri.toString()}`);
-        if (this.documentSkipVersionOnChange.get(doc) === doc.version) {
+        this.logger.debug(`${LOG_PREFIX}: Change text document for uri: ${document.uri.toString()}`);
+        if (this.documentSkipVersionOnChange.get(document) === document.version) {
             this.logger.debug(`${LOG_PREFIX}: Skipping a change since versions equals`);
             return;
         }
 
-        // Store dot repeat
         const activeEditor = window.activeTextEditor;
-        if (activeEditor && activeEditor.document === doc && this.modeManager.isInsertMode) {
-            const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
+
+        // Store dot repeat
+        if (activeEditor && activeEditor.document === document && this.modeManager.isInsertMode) {
+            const eol = document.eol === EndOfLine.LF ? "\n" : "\r\n";
             const cursor = activeEditor.selection.active;
             for (const change of contentChanges) {
                 if (isCursorChange(change, cursor, eol)) {
@@ -474,51 +538,11 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             }
         }
 
-        const origText = this.documentContentInNeovim.get(doc);
-        if (origText == null) {
-            this.logger.warn(`${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`);
-            return;
+        if (!this.changedDocuments.has(document)) this.changedDocuments.set(document, [...contentChanges]);
+        else this.changedDocuments.get(document)!.push(...contentChanges);
+
+        if (!this.modeManager.isInsertMode) {
+            this.syncDocumentsWithNeovim();
         }
-
-        const bufId = this.bufferManager.getBufferIdForTextDocument(doc);
-        if (!bufId) {
-            this.logger.warn(`${LOG_PREFIX}: No neovim buffer for ${doc.uri.toString()}`);
-            return;
-        }
-
-        this.documentContentInNeovim.set(doc, doc.getText());
-
-        const requests: [string, unknown[]][] = [];
-        const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
-
-        for (const change of contentChanges) {
-            const start = change.range.start;
-            const end = change.range.end;
-
-            // vscode indexes by character, but neovim indexes by byte
-            // count the number of bytes in the line to get the neovim index
-            const startText = origText.split(eol)[start.line].slice(0, start.character);
-            const startBytes = Buffer.byteLength(startText, "utf8");
-            const endText = origText.split(eol)[end.line].slice(0, end.character);
-            const endBytes = Buffer.byteLength(endText, "utf8");
-
-            requests.push([
-                "nvim_buf_set_text",
-                [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
-            ]);
-        }
-        const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
-        if (!bufTick) {
-            this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
-            return;
-        }
-        this.logger.debug(
-            `${LOG_PREFIX}: BufId: ${bufId}, lineChanges: ${requests.length}, tick: ${bufTick}, skipTick: ${
-                bufTick + requests.length
-            }`,
-        );
-        this.bufferSkipTicks.set(bufId, bufTick + requests.length);
-
-        if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     };
 }

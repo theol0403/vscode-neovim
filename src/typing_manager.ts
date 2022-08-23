@@ -4,7 +4,7 @@ import { commands, Disposable, TextEditor, TextEditorEdit, window } from "vscode
 import { DocumentChangeManager } from "./document_change_manager";
 import { Logger } from "./logger";
 import { ModeManager } from "./mode_manager";
-import { callAtomic, getNeovimCursorPosFromEditor, normalizeInputString } from "./utils";
+import { normalizeInputString } from "./utils";
 
 const LOG_PREFIX = "TypingManager";
 
@@ -128,13 +128,8 @@ export class TypingManager implements Disposable {
         this.logger.debug(`${LOG_PREFIX}: Send for: ${key}`);
         if (this.modeManager.isInsertMode && !(await this.client.mode).blocking) {
             this.logger.debug(`${LOG_PREFIX}: Syncing buffers with neovim (${key})`);
+            await this.changeManager.syncDocumentsWithNeovim();
             await this.changeManager.syncDotRepeatWithNeovim();
-            if (window.activeTextEditor) {
-                const requests: [string, unknown[]][] = [
-                    ["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]],
-                ];
-                await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
-            }
             const keys = normalizeInputString(this.pendingKeysAfterExit);
             this.logger.debug(`${LOG_PREFIX}: Pending keys sent with ${key}: ${keys}`);
             this.pendingKeysAfterExit = "";
