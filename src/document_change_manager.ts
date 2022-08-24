@@ -1,4 +1,3 @@
-import diff from "fast-diff";
 import { NeovimClient } from "neovim";
 import {
     Disposable,
@@ -9,7 +8,6 @@ import {
     Selection,
     TextDocument,
     TextDocumentChangeEvent,
-    TextDocumentContentChangeEvent,
     window,
     workspace,
 } from "vscode";
@@ -18,20 +16,13 @@ import { BufferManager } from "./buffer_manager";
 import { Logger } from "./logger";
 import { ModeManager } from "./mode_manager";
 import { NeovimExtensionRequestProcessable } from "./neovim_events_processable";
+import { getNeovimCursor } from "./test/utils";
 import {
-    accumulateDotRepeatChange,
-    applyEditorDiffOperations,
+    calcDiffWithPosition,
     callAtomic,
-    computeEditorOperationsFromDiff,
     convertCharNumToByteNum,
-    diffLineToChars,
-    DotRepeatChange,
     getDocumentLineArray,
     getNeovimCursorPosFromEditor,
-    isChangeSubsequentToChange,
-    isCursorChange,
-    normalizeDotRepeatChange,
-    prepareEditRangesFromDiff,
 } from "./utils";
 
 const LOG_PREFIX = "DocumentChangeManager";
@@ -78,11 +69,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     /**
      * Set of changed documents since last neovim sync
      */
-    private changedDocuments: Map<TextDocument, Array<TextDocumentContentChangeEvent>> = new Map();
-    /**
-     * Dot repeat workaround
-     */
-    private dotRepeatChange: DotRepeatChange | undefined;
+    private changedDocuments: Set<TextDocument> = new Set();
     /**
      * True when we're currently applying edits, so incoming changes will go into pending events queue
      */
@@ -132,17 +119,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         const changedDocs = [...this.changedDocuments];
         this.changedDocuments.clear();
 
-        for (const [doc, changes] of changedDocs) {
+        for (const doc of changedDocs) {
             this.logger.debug(`${LOG_PREFIX}: Processing document ${doc.uri.toString()}`);
             if (doc.isClosed) {
                 this.logger.warn(`${LOG_PREFIX}: Document ${doc.uri.toString()} is closed, skipping`);
-                continue;
-            }
-            const origText = this.documentContentInNeovim.get(doc);
-            if (origText == null) {
-                this.logger.warn(
-                    `${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`,
-                );
                 continue;
             }
 
@@ -152,95 +132,83 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 continue;
             }
 
-            this.documentContentInNeovim.set(doc, doc.getText());
+            const activeEditor = window.activeTextEditor;
+            if (!activeEditor) {
+                this.logger.warn(`${LOG_PREFIX}: No active editor, skipping`);
+                return;
+            }
+
+            const winId = this.bufferManager.getWinIdForTextEditor(activeEditor);
+            if (!winId) {
+                this.logger.warn(`${LOG_PREFIX}: No neovim window for ${doc.uri.toString()}`);
+                return;
+            }
+
+            const origText = this.documentContentInNeovim.get(doc);
+            if (origText == null) {
+                this.logger.warn(
+                    `${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`,
+                );
+                continue;
+            }
+
+            const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
+            if (!bufTick) {
+                this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
+                return;
+            }
+
+            const newText = doc.getText();
+            this.documentContentInNeovim.set(doc, newText);
 
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
+            const changes = calcDiffWithPosition(origText, newText, eol);
 
-            for (const change of changes) {
-                const start = change.range.start;
-                const end = change.range.end;
+            let newTicks = 0;
 
+            for (const [start, end, text, rangeLength] of changes) {
                 // vscode indexes by character, but neovim indexes by byte
                 const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
                 const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
-                requests.push([
-                    "nvim_buf_set_text",
-                    [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
-                ]);
+                if (rangeLength == 0 && this.modeManager.isInsertMode) {
+                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
+                    requests.push(["nvim_feedkeys", [text, "nt", true]]);
+                    newTicks++;
+                } else if (text === "" && this.modeManager.isInsertMode) {
+                    const neovimCursor = await getNeovimCursor(this.client);
+                    const cursor = new Position(neovimCursor[0], neovimCursor[1]);
+                    if (end.isBeforeOrEqual(cursor)) {
+                        // we deleted using backspace
+                        requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
+                        requests.push(["nvim_input", ["<BS>".repeat(rangeLength)]]);
+                    } else {
+                        // we deleted using delete
+                        requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
+                        requests.push(["nvim_input", ["<Del>".repeat(rangeLength)]]);
+                    }
+                    newTicks++;
+                } else {
+                    requests.push([
+                        "nvim_buf_set_text",
+                        [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
+                    ]);
+                    newTicks++;
+                }
             }
-            const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
-            if (!bufTick) {
-                this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
-                continue;
-            }
+
             this.logger.debug(
-                `${LOG_PREFIX}: BufId: ${bufId}, lineChanges: ${requests.length}, tick: ${bufTick}, skipTick: ${
-                    bufTick + requests.length
+                `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
+                    bufTick + newTicks
                 }`,
             );
-            this.bufferSkipTicks.set(bufId, bufTick + requests.length);
+            this.bufferSkipTicks.set(bufId, bufTick + newTicks);
         }
 
         if (window.activeTextEditor)
             requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]]);
 
         if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
-    }
-
-    public async syncDotRepeatWithNeovim(): Promise<void> {
-        // dot-repeat executes last change across all buffers. So we'll create a temporary buffer & window,
-        // replay last changes here to trick neovim and destroy it after
-        if (!this.dotRepeatChange) {
-            return;
-        }
-        this.logger.debug(`${LOG_PREFIX}: Syncing dot repeat`);
-        const dotRepeatChange = { ...this.dotRepeatChange };
-        this.dotRepeatChange = undefined;
-
-        const currWin = await this.client.window;
-
-        // temporary buffer to replay the changes
-        const buf = await this.client.createBuffer(false, true);
-        if (typeof buf === "number") {
-            return;
-        }
-        // create temporary win
-        await this.client.setOption("eventignore", "BufWinEnter,BufEnter,BufLeave");
-        const win = await this.client.openWindow(buf, true, {
-            external: true,
-            width: 100,
-            height: 100,
-        });
-        await this.client.setOption("eventignore", "");
-        if (typeof win === "number") {
-            return;
-        }
-        const edits: [string, unknown[]][] = [];
-
-        // for delete changes we need an actual text, so let's prefill with something
-        // accumulate all possible lengths of deleted text to be safe
-        const delRangeLength = dotRepeatChange.rangeLength;
-        if (delRangeLength) {
-            const stub = new Array(delRangeLength).fill("x").join("");
-            edits.push(
-                ["nvim_buf_set_lines", [buf.id, 0, 0, false, [stub]]],
-                ["nvim_win_set_cursor", [win.id, [1, delRangeLength]]],
-            );
-        }
-        let editStr = "";
-        if (dotRepeatChange.rangeLength) {
-            editStr += [...new Array(dotRepeatChange.rangeLength).keys()].map(() => "<BS>").join("");
-        }
-        editStr += dotRepeatChange.text.split(dotRepeatChange.eol).join("\n").replace("<", "<LT>");
-        edits.push(["nvim_input", [editStr]]);
-        // since nvim_input is not blocking we need replay edits first, then clean up things in subsequent request
-        await callAtomic(this.client, edits, this.logger, LOG_PREFIX);
-
-        const cleanEdits: [string, unknown[]][] = [];
-        cleanEdits.push(["nvim_set_current_win", [currWin.id]]);
-        cleanEdits.push(["nvim_win_close", [win.id, true]]);
-        await callAtomic(this.client, cleanEdits, this.logger, LOG_PREFIX);
     }
 
     private onBufferInit: BufferManager["onBufferInit"] = (id, doc) => {
@@ -382,81 +350,29 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                         this.logger.debug(`${LOG_PREFIX}: No visible text editor for document, skipping`);
                         continue;
                     }
-                    let oldText = doc.getText();
+
+                    const oldText = doc.getText();
                     const eol = doc.eol === EndOfLine.CRLF ? "\r\n" : "\n";
-                    let newText = newLines.join(eol);
-                    // add few lines to the end otherwise diff may be wrong for a newline characters
-                    oldText += `${eol}end${eol}end`;
-                    newText += `${eol}end${eol}end`;
-                    const diffPrepare = diffLineToChars(oldText, newText);
-                    const d = diff(diffPrepare.chars1, diffPrepare.chars2);
-                    const ranges = prepareEditRangesFromDiff(d);
-                    if (!ranges.length) {
-                        continue;
-                    }
+                    const newText = newLines.join(eol);
+
+                    const changes = calcDiffWithPosition(oldText, newText, eol);
+                    if (!changes.length) continue;
+
                     this.documentSkipVersionOnChange.set(doc, doc.version + 1);
 
                     const cursorBefore = editor.selection.active;
                     const success = await editor.edit(
                         (builder) => {
-                            for (const range of ranges) {
-                                const text = newLines.slice(range.newStart, range.newEnd + 1);
-                                if (range.type === "removed") {
-                                    if (range.end >= editor.document.lineCount - 1 && range.start > 0) {
-                                        const startChar = editor.document.lineAt(range.start - 1).range.end.character;
-                                        builder.delete(new Range(range.start - 1, startChar, range.end, 999999));
-                                    } else {
-                                        builder.delete(new Range(range.start, 0, range.end + 1, 0));
-                                    }
-                                } else if (range.type === "changed") {
-                                    // builder.delete(new Range(range.start, 0, range.end, 999999));
-                                    // builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() can select text. This usually happens when you add something at end of a line
-                                    // !We're trying to mitigate it here by checking if we're just adding characters and using insert() instead
-                                    // !As fallback we look after applying edits if we have selection
-                                    const oldText = editor.document
-                                        .getText(new Range(range.start, 0, range.end, 99999))
-                                        .replace("\r\n", "\n");
-                                    const newText = text.join("\n");
-                                    if (newText.length > oldText.length && newText.startsWith(oldText)) {
-                                        builder.insert(
-                                            new Position(range.start, oldText.length),
-                                            newText.slice(oldText.length),
-                                        );
-                                    } else {
-                                        const changeSpansOneLineOnly =
-                                            range.start == range.end && range.newStart == range.newEnd;
-
-                                        let editorOps;
-
-                                        if (changeSpansOneLineOnly) {
-                                            editorOps = computeEditorOperationsFromDiff(diff(oldText, newText));
-                                        }
-
-                                        // If supported, efficiently modify only part of line that has changed by
-                                        // generating a diff and computing editor operations from it. This prevents
-                                        // flashes of non syntax-highlighted text (e.g. when `x` or `cw`, only
-                                        // remove a single char/the word).
-                                        if (editorOps && changeSpansOneLineOnly) {
-                                            applyEditorDiffOperations(builder, { editorOps, line: range.newStart });
-                                        } else {
-                                            builder.replace(
-                                                new Range(range.start, 0, range.end, 999999),
-                                                text.join("\n"),
-                                            );
-                                        }
-                                    }
-                                } else if (range.type === "added") {
-                                    if (range.start >= editor.document.lineCount) {
-                                        text.unshift(
-                                            ...new Array(range.start - (editor.document.lineCount - 1)).fill(""),
-                                        );
-                                    } else {
-                                        text.push("");
-                                    }
-                                    builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() selects text
-                                    // builder.replace(new Position(range.start, 0), text.join("\n"));
+                            for (const [start, end, text, rangeLength] of changes) {
+                                if (rangeLength == 0) {
+                                    builder.insert(start, text);
+                                    console.log("insert", start, text);
+                                } else if (text === "") {
+                                    builder.delete(new Range(start, end));
+                                    console.log("delete", start, end);
+                                } else {
+                                    builder.replace(new Range(start, end), text);
+                                    console.log("replace", start, end, text);
                                 }
                             }
                         },
@@ -518,26 +434,12 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             this.logger.debug(`${LOG_PREFIX}: Skipping a change since versions equals`);
             return;
         }
-
-        const activeEditor = window.activeTextEditor;
-
-        // Store dot repeat
-        if (activeEditor && activeEditor.document === document && this.modeManager.isInsertMode) {
-            const eol = document.eol === EndOfLine.LF ? "\n" : "\r\n";
-            const cursor = activeEditor.selection.active;
-            for (const change of contentChanges) {
-                if (isCursorChange(change, cursor, eol)) {
-                    if (this.dotRepeatChange && isChangeSubsequentToChange(change, this.dotRepeatChange)) {
-                        this.dotRepeatChange = accumulateDotRepeatChange(change, this.dotRepeatChange);
-                    } else {
-                        this.dotRepeatChange = normalizeDotRepeatChange(change, eol);
-                    }
-                }
-            }
+        if (!contentChanges.length) {
+            this.logger.debug(`${LOG_PREFIX}: Skipping a change since no content changes`);
+            return;
         }
 
-        if (!this.changedDocuments.has(document)) this.changedDocuments.set(document, [...contentChanges]);
-        else this.changedDocuments.get(document)!.push(...contentChanges);
+        this.changedDocuments.add(document);
 
         if (!this.modeManager.isInsertMode) {
             this.syncDocumentsWithNeovim();

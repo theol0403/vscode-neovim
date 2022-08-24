@@ -397,19 +397,8 @@ export class CursorManager
         }
         const editorName = `${editor.document.uri.toString()}, viewColumn: ${editor.viewColumn}`;
         this.logger.debug(`${LOG_PREFIX}: Updating cursor in editor: ${editorName}, pos: [${newLine}, ${newCol}]`);
-        if (editor !== window.activeTextEditor) {
-            this.logger.debug(
-                `${LOG_PREFIX}: Editor: ${editorName} is not active text editor, setting cursor directly`,
-            );
-            const newPos = new Selection(newLine, newCol, newLine, newCol);
-            if (!editor.selection.isEqual(newPos)) {
-                editor.selections = [newPos];
-            }
-            return;
-        }
         const currCursor = editor.selection.active;
         const deltaLine = newLine - currCursor.line;
-        this.logger.debug(`${LOG_PREFIX}: Editor: ${editorName} setting cursor directly`);
         const newPos = new Selection(newLine, newCol, newLine, newCol);
         if (!editor.selection.isEqual(newPos)) {
             editor.selections = [newPos];

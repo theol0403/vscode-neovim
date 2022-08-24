@@ -1,189 +1,38 @@
-import {
-    workspace,
-    TextEditor,
-    TextDocumentContentChangeEvent,
-    Position,
-    TextDocument,
-    EndOfLine,
-    Range,
-    TextEditorEdit,
-} from "vscode";
-import diff, { Diff } from "fast-diff";
+import { workspace, TextEditor, TextDocumentContentChangeEvent, Position, TextDocument, EndOfLine } from "vscode";
 import wcwidth from "ts-wcwidth";
 import { NeovimClient } from "neovim";
+import { calcPatch } from "fast-myers-diff";
 
 import { Logger } from "./logger";
 
 export const EXT_NAME = "vscode-neovim";
 export const EXT_ID = `asvetliakov.${EXT_NAME}`;
 
-export interface EditRange {
-    start: number;
-    end: number;
-    newStart: number;
-    newEnd: number;
-    type: "changed" | "removed" | "added";
-}
-
 export type GridLineEvent = [number, number, number, [string, number, number][]];
 
-/**
- * Stores last changes information for dot repeat
- */
-export interface DotRepeatChange {
-    /**
-     * Num of deleted characters, 0 when only added
-     */
-    rangeLength: number;
-    /**
-     * Range offset
-     */
-    rangeOffset: number;
-    /**
-     * Change text
-     */
-    text: string;
-    /**
-     * Text eol
-     */
-    eol: string;
-}
-
-// Copied from https://github.com/google/diff-match-patch/blob/master/javascript/diff_match_patch_uncompressed.js
-export function diffLineToChars(text1: string, text2: string): { chars1: string; chars2: string; lineArray: string[] } {
-    const lineArray: string[] = []; // e.g. lineArray[4] == 'Hello\n'
-    const lineHash: { [key: string]: number } = {}; // e.g. lineHash['Hello\n'] == 4
-
-    // '\x00' is a valid character, but various debuggers don't like it.
-    // So we'll insert a junk entry to avoid generating a null character.
-    lineArray[0] = "";
-
-    /**
-     * Split a text into an array of strings.  Reduce the texts to a string of
-     * hashes where each Unicode character represents one line.
-     * Modifies linearray and linehash through being a closure.
-     * @param {string} text String to encode.
-     * @return {string} Encoded string.
-     * @private
-     */
-    const linesToCharsMunge = (text: string, maxLines: number): string => {
-        let chars = "";
-        // Walk the text, pulling out a substring for each line.
-        // text.split('\n') would would temporarily double our memory footprint.
-        // Modifying text would create many large strings to garbage collect.
-        let lineStart = 0;
-        let lineEnd = -1;
-        // Keeping our own length variable is faster than looking it up.
-        let lineArrayLength = lineArray.length;
-        while (lineEnd < text.length - 1) {
-            lineEnd = text.indexOf("\n", lineStart);
-            if (lineEnd == -1) {
-                lineEnd = text.length - 1;
-            }
-            let line = text.substring(lineStart, lineEnd + 1);
-
-            // eslint-disable-next-line no-prototype-builtins
-            if (lineHash.hasOwnProperty ? lineHash.hasOwnProperty(line) : lineHash[line] !== undefined) {
-                chars += String.fromCharCode(lineHash[line]);
-            } else {
-                if (lineArrayLength == maxLines) {
-                    // Bail out at 65535 because
-                    // String.fromCharCode(65536) == String.fromCharCode(0)
-                    line = text.substring(lineStart);
-                    lineEnd = text.length;
-                }
-                chars += String.fromCharCode(lineArrayLength);
-                lineHash[line] = lineArrayLength;
-                lineArray[lineArrayLength++] = line;
-            }
-            lineStart = lineEnd + 1;
-        }
-        return chars;
-    };
-    // Allocate 2/3rds of the space for text1, the rest for text2.
-    const chars1 = linesToCharsMunge(text1, 40000);
-    const chars2 = linesToCharsMunge(text2, 65535);
-    return { chars1: chars1, chars2: chars2, lineArray: lineArray };
-}
-
-export function prepareEditRangesFromDiff(diffs: Diff[]): EditRange[] {
-    const ranges: EditRange[] = [];
-    // 0 - not changed, diff.length is length of non changed lines
-    // 1 - added, length is added lines
-    // -1 removed, length is removed lines
-    let oldIdx = 0;
-    let newIdx = 0;
-    let currRange: EditRange | undefined;
-    let currRangeDiff = 0;
-    for (let i = 0; i < diffs.length; i++) {
-        const [diffRes, diffStr] = diffs[i];
-        if (diffRes === 0) {
-            if (currRange) {
-                // const diff = currRange.newEnd - currRange.newStart - (currRange.end - currRange.start);
-                if (currRange.type === "changed") {
-                    // changed range is inclusive
-                    oldIdx += 1 + (currRange.end - currRange.start);
-                    newIdx += 1 + (currRange.newEnd - currRange.newStart);
-                } else if (currRange.type === "added") {
-                    // added range is non inclusive
-                    newIdx += Math.abs(currRangeDiff);
-                } else if (currRange.type === "removed") {
-                    // removed range is non inclusive
-                    oldIdx += Math.abs(currRangeDiff);
-                }
-                ranges.push(currRange);
-                currRange = undefined;
-                currRangeDiff = 0;
-            }
-            oldIdx += diffStr.length;
-            newIdx += diffStr.length;
-            // if first change is single newline, then it's being eaten into the equal diff. probably comes from optimization by trimming common prefix?
-            // if (
-            //     ranges.length === 0 &&
-            //     diffStr.length !== 1 &&
-            //     diffs[i + 1] &&
-            //     diffs[i + 1][0] === 1 &&
-            //     diffs[i + 1][1].length === 1 &&
-            //     diffs[i + 1][1].charCodeAt(0) === 3
-            // ) {
-            //     oldIdx--;
-            //     newIdx--;
-            // }
-        } else {
-            if (!currRange) {
-                currRange = {
-                    start: oldIdx,
-                    end: oldIdx,
-                    newStart: newIdx,
-                    newEnd: newIdx,
-                    type: "changed",
-                };
-                currRangeDiff = 0;
-            }
-            if (diffRes === -1) {
-                // handle single string change, the diff will be -1,1 in this case
-                if (diffStr.length === 1 && diffs[i + 1] && diffs[i + 1][0] === 1 && diffs[i + 1][1].length === 1) {
-                    i++;
-                    continue;
-                }
-                currRange.type = "removed";
-                currRange.end += diffStr.length - 1;
-                currRangeDiff = -diffStr.length;
-            } else {
-                if (currRange.type === "removed") {
-                    currRange.type = "changed";
-                } else {
-                    currRange.type = "added";
-                }
-                currRange.newEnd += diffStr.length - 1;
-                currRangeDiff += diffStr.length;
-            }
-        }
+export function calcDiffWithPosition(
+    oldText: string,
+    newText: string,
+    eol: string,
+): Array<[Position, Position, string, number]> {
+    const splitText = oldText.split(eol);
+    const diff: Array<[Position, Position, string, number]> = [];
+    const patch = calcPatch(oldText, newText);
+    for (const change of patch) {
+        const lineStart = oldText.slice(0, change[0]).split(eol).length - 1;
+        const lineEnd = oldText.slice(0, change[1]).split(eol).length - 1;
+        const charStart =
+            lineStart > 0 ? change[0] - (splitText.slice(0, lineStart).join(eol).length + eol.length) : change[0];
+        const charEnd =
+            lineEnd > 0 ? change[1] - (splitText.slice(0, lineEnd).join(eol).length + eol.length) : change[1];
+        diff.push([
+            new Position(lineStart, charStart),
+            new Position(lineEnd, charEnd),
+            change[2],
+            change[1] - change[0],
+        ]);
     }
-    if (currRange) {
-        ranges.push(currRange);
-    }
-    return ranges;
+    return diff;
 }
 
 function getBytesFromCodePoint(point?: number): number {
@@ -266,44 +115,6 @@ export function calculateEditorColFromVimScreenCol(
     return currentCharIdx;
 }
 
-export function isChangeSubsequentToChange(
-    change: TextDocumentContentChangeEvent,
-    lastChange: DotRepeatChange,
-): boolean {
-    const lastChangeTextLength = lastChange.text.length;
-    const lastChangeOffsetStart = lastChange.rangeOffset;
-    const lastChangeOffsetEnd = lastChange.rangeOffset + lastChangeTextLength;
-
-    if (change.rangeOffset >= lastChangeOffsetStart && change.rangeOffset <= lastChangeOffsetEnd) {
-        return true;
-    }
-
-    if (
-        change.rangeOffset < lastChangeOffsetStart &&
-        change.rangeOffset + change.rangeLength >= lastChangeOffsetStart
-    ) {
-        return true;
-    }
-
-    return false;
-}
-
-export function isCursorChange(change: TextDocumentContentChangeEvent, cursor: Position, eol: string): boolean {
-    if (change.range.contains(cursor)) {
-        return true;
-    }
-    if (change.range.isSingleLine && change.text) {
-        const lines = change.text.split(eol);
-        const lineLength = lines.length;
-        const newEndLineRange = change.range.start.line + lineLength - 1;
-        const newEndLastLineCharRange = change.range.end.character + lines.slice(-1)[0].length;
-        if (newEndLineRange >= cursor.line && newEndLastLineCharRange >= cursor.character) {
-            return true;
-        }
-    }
-    return false;
-}
-
 type LegacySettingName = "neovimPath" | "neovimInitPath";
 type SettingPrefix = "neovimExecutablePaths" | "neovimInitVimPaths"; //this needs to be aligned with setting names in package.json
 type Platform = "win32" | "darwin" | "linux";
@@ -345,50 +156,6 @@ export function getNeovimInitPath(): string | undefined {
         vscodeSettingName: "neovimInitPath",
     } as const;
     return getSystemSpecificSetting("neovimInitVimPaths", legacySettingInfo);
-}
-
-export function normalizeDotRepeatChange(change: TextDocumentContentChangeEvent, eol: string): DotRepeatChange {
-    return {
-        rangeLength: change.rangeLength,
-        rangeOffset: change.rangeOffset,
-        text: change.text,
-        eol,
-    };
-}
-
-export function accumulateDotRepeatChange(
-    change: TextDocumentContentChangeEvent,
-    lastChange: DotRepeatChange,
-): DotRepeatChange {
-    const newLastChange: DotRepeatChange = {
-        ...lastChange,
-    };
-
-    const removedLength =
-        change.rangeOffset <= lastChange.rangeOffset
-            ? change.rangeOffset - lastChange.rangeOffset + change.rangeLength
-            : change.rangeLength;
-
-    const sliceBeforeStart = 0;
-    const sliceBeforeEnd =
-        change.rangeOffset <= lastChange.rangeOffset
-            ? // ? sliceBeforeStart + removedLength
-              0
-            : change.rangeOffset - lastChange.rangeOffset;
-
-    const sliceAfterStart = change.rangeOffset - lastChange.rangeOffset + removedLength;
-
-    // adjust text
-    newLastChange.text =
-        lastChange.text.slice(sliceBeforeStart, sliceBeforeEnd) + change.text + lastChange.text.slice(sliceAfterStart);
-
-    // adjust offset & range length
-    // we need to account the case only when text was deleted before the original change
-    if (change.rangeOffset < lastChange.rangeOffset) {
-        newLastChange.rangeOffset = change.rangeOffset;
-        newLastChange.rangeLength += change.rangeLength;
-    }
-    return newLastChange;
 }
 
 export function editorPositionToNeovimPosition(editor: TextEditor, position: Position): [number, number] {
@@ -456,81 +223,4 @@ export async function callAtomic(
     if (errors.length) {
         logger.error(`${prefix}:\n${errors.join("\n")}`);
     }
-}
-
-type EditorDiffOperation = { op: -1 | 0 | 1; range: [number, number]; chars: string | null };
-
-export function computeEditorOperationsFromDiff(diffs: diff.Diff[]): EditorDiffOperation[] {
-    let curCol = 0;
-    return diffs
-        .map(([op, chars]: diff.Diff) => {
-            let editorOp: EditorDiffOperation | null = null;
-
-            switch (op) {
-                // -1
-                case diff.DELETE:
-                    editorOp = {
-                        op,
-                        range: [curCol, curCol + chars.length],
-                        chars: null,
-                    };
-                    curCol += chars.length;
-                    break;
-
-                // 0
-                case diff.EQUAL:
-                    curCol += chars.length;
-                    break;
-
-                // +1
-                case diff.INSERT:
-                    editorOp = {
-                        op,
-                        range: [curCol, curCol],
-                        chars,
-                    };
-                    curCol += 0; // NOP
-                    break;
-
-                default:
-                    throw new Error("Operation not supported");
-            }
-
-            return editorOp;
-        })
-        .filter(isNotNull);
-
-    // User-Defined Type Guard
-    // https://stackoverflow.com/a/54318054
-    function isNotNull<T>(argument: T | null): argument is T {
-        return argument !== null;
-    }
-}
-
-export function applyEditorDiffOperations(
-    builder: TextEditorEdit,
-    { editorOps, line }: { editorOps: EditorDiffOperation[]; line: number },
-): void {
-    editorOps.forEach((editorOp) => {
-        const {
-            op,
-            range: [from, to],
-            chars,
-        } = editorOp;
-
-        switch (op) {
-            case diff.DELETE:
-                builder.delete(new Range(new Position(line, from), new Position(line, to)));
-                break;
-
-            case diff.INSERT:
-                if (chars) {
-                    builder.insert(new Position(line, from), chars);
-                }
-                break;
-
-            default:
-                break;
-        }
-    });
 }
