@@ -171,11 +171,11 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
                 const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
-                if (rangeLength == 0 && this.modeManager.isInsertMode) {
+                if (rangeLength == 0) {
                     requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
-                    requests.push(["nvim_feedkeys", [text, "nt", true]]);
+                    requests.push(["nvim_input", [text.replace(eol, "<CR>")]]);
                     newTicks++;
-                } else if (text === "" && this.modeManager.isInsertMode) {
+                } else if (text === "") {
                     const neovimCursor = await getNeovimCursor(this.client);
                     const cursor = new Position(neovimCursor[0], neovimCursor[1]);
                     if (end.isBeforeOrEqual(cursor)) {
@@ -366,13 +366,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                             for (const [start, end, text, rangeLength] of changes) {
                                 if (rangeLength == 0) {
                                     builder.insert(start, text);
-                                    console.log("insert", start, text);
                                 } else if (text === "") {
                                     builder.delete(new Range(start, end));
-                                    console.log("delete", start, end);
                                 } else {
                                     builder.replace(new Range(start, end), text);
-                                    console.log("replace", start, end, text);
                                 }
                             }
                         },

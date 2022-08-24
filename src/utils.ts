@@ -1,4 +1,4 @@
-import { workspace, TextEditor, TextDocumentContentChangeEvent, Position, TextDocument, EndOfLine } from "vscode";
+import { workspace, TextEditor, Position, TextDocument, EndOfLine } from "vscode";
 import wcwidth from "ts-wcwidth";
 import { NeovimClient } from "neovim";
 import { calcPatch } from "fast-myers-diff";
