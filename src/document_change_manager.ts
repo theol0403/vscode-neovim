@@ -171,42 +171,55 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
                 const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
-                if (rangeLength == 0) {
-                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
-                    requests.push(["nvim_input", [text.replace(eol, "<CR>")]]);
-                    newTicks++;
-                } else if (text === "") {
-                    const neovimCursor = await getNeovimCursor(this.client);
-                    const cursor = new Position(neovimCursor[0], neovimCursor[1]);
-                    if (end.isBeforeOrEqual(cursor)) {
-                        // we deleted using backspace
-                        requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
-                        requests.push(["nvim_input", ["<BS>".repeat(rangeLength)]]);
-                    } else {
-                        // we deleted using delete
-                        requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
-                        requests.push(["nvim_input", ["<Del>".repeat(rangeLength)]]);
+                let typedChange = false;
+
+                // if currently editing active doc, try to replay typing to preserve dot repeat
+                if (activeEditor.document == doc) {
+                    if (rangeLength == 0) {
+                        await this.client.request("nvim_win_set_cursor", [winId, [start.line + 1, start.character]]);
+                        await this.client.input(text.replace(eol, "<CR>"));
+                        newTicks;
+                        typedChange = true;
+                    } else if (text === "") {
+                        const neovimCursor = await getNeovimCursor(this.client);
+                        const cursor = new Position(neovimCursor[0], neovimCursor[1]);
+                        if (end.isBeforeOrEqual(cursor)) {
+                            // we deleted using backspace
+                            await this.client.request("nvim_win_set_cursor", [
+                                winId,
+                                [start.line + 1, start.character + 1],
+                            ]);
+                            await this.client.input(text.replace(eol, "<BS>".repeat(rangeLength)));
+                        } else {
+                            // we deleted using delete
+                            await this.client.request("nvim_win_set_cursor", [
+                                winId,
+                                [start.line + 1, start.character],
+                            ]);
+                            await this.client.input(text.replace(eol, "<Del>".repeat(rangeLength)));
+                        }
+                        newTicks++;
+                        typedChange = true;
                     }
-                    newTicks++;
-                } else {
+                    requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
+                }
+
+                if (!typedChange) {
                     requests.push([
                         "nvim_buf_set_text",
                         [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
                     ]);
                     newTicks++;
                 }
+
+                this.logger.debug(
+                    `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
+                        bufTick + newTicks
+                    }`,
+                );
+                this.bufferSkipTicks.set(bufId, bufTick + newTicks);
             }
-
-            this.logger.debug(
-                `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
-                    bufTick + newTicks
-                }`,
-            );
-            this.bufferSkipTicks.set(bufId, bufTick + newTicks);
         }
-
-        if (window.activeTextEditor)
-            requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]]);
 
         if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     }
