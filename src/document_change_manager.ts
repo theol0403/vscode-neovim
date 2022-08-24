@@ -1,4 +1,4 @@
-import diff from "fast-diff";
+import { calcPatch } from "fast-myers-diff";
 import { NeovimClient } from "neovim";
 import {
     Disposable,
@@ -18,15 +18,7 @@ import { BufferManager } from "./buffer_manager";
 import { Logger } from "./logger";
 import { ModeManager } from "./mode_manager";
 import { NeovimExtensionRequestProcessable } from "./neovim_events_processable";
-import {
-    applyEditorDiffOperations,
-    callAtomic,
-    computeEditorOperationsFromDiff,
-    convertCharNumToByteNum,
-    diffLineToChars,
-    getDocumentLineArray,
-    prepareEditRangesFromDiff,
-} from "./utils";
+import { callAtomic, convertCharNumToByteNum, getDocumentLineArray } from "./utils";
 import { getNeovimCursor } from "./test/utils";
 
 const LOG_PREFIX = "DocumentChangeManager";
@@ -255,16 +247,13 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                         this.logger.debug(`${LOG_PREFIX}: No visible text editor for document, skipping`);
                         continue;
                     }
-                    let oldText = doc.getText();
+                    const oldText = doc.getText();
                     const eol = doc.eol === EndOfLine.CRLF ? "\r\n" : "\n";
-                    let newText = newLines.join(eol);
-                    // add few lines to the end otherwise diff may be wrong for a newline characters
-                    oldText += `${eol}end${eol}end`;
-                    newText += `${eol}end${eol}end`;
-                    const diffPrepare = diffLineToChars(oldText, newText);
-                    const d = diff(diffPrepare.chars1, diffPrepare.chars2);
-                    const ranges = prepareEditRangesFromDiff(d);
-                    if (!ranges.length) {
+                    const newText = newLines.join(eol);
+
+                    const changes = Array.from(calcPatch(oldText, newText));
+
+                    if (!changes.length) {
                         continue;
                     }
                     this.documentSkipVersionOnChange.set(doc, doc.version + 1);
@@ -272,65 +261,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     const cursorBefore = editor.selection.active;
                     const success = await editor.edit(
                         (builder) => {
-                            for (const range of ranges) {
-                                const text = newLines.slice(range.newStart, range.newEnd + 1);
-                                if (range.type === "removed") {
-                                    if (range.end >= editor.document.lineCount - 1 && range.start > 0) {
-                                        const startChar = editor.document.lineAt(range.start - 1).range.end.character;
-                                        builder.delete(new Range(range.start - 1, startChar, range.end, 999999));
-                                    } else {
-                                        builder.delete(new Range(range.start, 0, range.end + 1, 0));
-                                    }
-                                } else if (range.type === "changed") {
-                                    // builder.delete(new Range(range.start, 0, range.end, 999999));
-                                    // builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() can select text. This usually happens when you add something at end of a line
-                                    // !We're trying to mitigate it here by checking if we're just adding characters and using insert() instead
-                                    // !As fallback we look after applying edits if we have selection
-                                    const oldText = editor.document
-                                        .getText(new Range(range.start, 0, range.end, 99999))
-                                        .replace("\r\n", "\n");
-                                    const newText = text.join("\n");
-                                    if (newText.length > oldText.length && newText.startsWith(oldText)) {
-                                        builder.insert(
-                                            new Position(range.start, oldText.length),
-                                            newText.slice(oldText.length),
-                                        );
-                                    } else {
-                                        const changeSpansOneLineOnly =
-                                            range.start == range.end && range.newStart == range.newEnd;
-
-                                        let editorOps;
-
-                                        if (changeSpansOneLineOnly) {
-                                            editorOps = computeEditorOperationsFromDiff(diff(oldText, newText));
-                                        }
-
-                                        // If supported, efficiently modify only part of line that has changed by
-                                        // generating a diff and computing editor operations from it. This prevents
-                                        // flashes of non syntax-highlighted text (e.g. when `x` or `cw`, only
-                                        // remove a single char/the word).
-                                        if (editorOps && changeSpansOneLineOnly) {
-                                            applyEditorDiffOperations(builder, { editorOps, line: range.newStart });
-                                        } else {
-                                            builder.replace(
-                                                new Range(range.start, 0, range.end, 999999),
-                                                text.join("\n"),
-                                            );
-                                        }
-                                    }
-                                } else if (range.type === "added") {
-                                    if (range.start >= editor.document.lineCount) {
-                                        text.unshift(
-                                            ...new Array(range.start - (editor.document.lineCount - 1)).fill(""),
-                                        );
-                                    } else {
-                                        text.push("");
-                                    }
-                                    builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() selects text
-                                    // builder.replace(new Position(range.start, 0), text.join("\n"));
-                                }
+                            for (const change in changes) {
+                                if (change[0] === change[1]) builder.insert(new Position(0, 0), "");
                             }
                         },
                         { undoStopAfter: false, undoStopBefore: false },
