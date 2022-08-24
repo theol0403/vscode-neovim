@@ -286,12 +286,8 @@ export class CursorManager
     };
 
     private onSelectionChanged = async (e: TextEditorSelectionChangeEvent): Promise<void> => {
-        if (this.modeManager.isInsertMode) {
-            return;
-        }
-        if (this.ignoreSelectionEvents) {
-            return;
-        }
+        if (this.modeManager.isInsertMode || this.ignoreSelectionEvents) return;
+
         const { textEditor, kind } = e;
         this.logger.debug(`${LOG_PREFIX}: SelectionChanged`);
 
@@ -392,9 +388,8 @@ export class CursorManager
      * Update cursor in active editor. Coords are zero based
      */
     private updateCursorPosInEditor = (editor: TextEditor, newLine: number, newCol: number): void => {
-        if (this.ignoreSelectionEvents) {
-            return;
-        }
+        if (this.modeManager.isInsertMode || this.ignoreSelectionEvents) return;
+
         const editorName = `${editor.document.uri.toString()}, viewColumn: ${editor.viewColumn}`;
         this.logger.debug(`${LOG_PREFIX}: Updating cursor in editor: ${editorName}, pos: [${newLine}, ${newCol}]`);
         if (editor !== window.activeTextEditor) {

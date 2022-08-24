@@ -393,6 +393,16 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             this.logger.debug(`${LOG_PREFIX}: Skipping a change since versions equals`);
             return;
         }
+        if (!contentChanges.length) {
+            this.logger.debug(`${LOG_PREFIX}: Skipping a change since no content changes`);
+            return;
+        }
+
+        const activeEditor = window.activeTextEditor;
+        if (!activeEditor) {
+            this.logger.warn(`${LOG_PREFIX}: No active editor, skipping`);
+            return;
+        }
 
         const origText = this.documentContentInNeovim.get(doc);
         if (origText == null) {
@@ -406,10 +416,24 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             return;
         }
 
+        const winId = this.bufferManager.getWinIdForTextEditor(activeEditor);
+        if (!winId) {
+            this.logger.warn(`${LOG_PREFIX}: No neovim window for ${doc.uri.toString()}`);
+            return;
+        }
+
         this.documentContentInNeovim.set(doc, doc.getText());
 
         const requests: [string, unknown[]][] = [];
         const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
+
+        const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
+        if (!bufTick) {
+            this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
+            return;
+        }
+
+        let newTicks = 0;
 
         for (const change of contentChanges) {
             const start = change.range.start;
@@ -422,22 +446,29 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             const endText = origText.split(eol)[end.line].slice(0, end.character);
             const endBytes = Buffer.byteLength(endText, "utf8");
 
-            requests.push([
-                "nvim_buf_set_text",
-                [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
-            ]);
+            if (change.rangeLength === 0 && this.modeManager.isInsertMode) {
+                requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
+                requests.push(["nvim_feedkeys", [change.text, "nt", 1]]);
+                newTicks++;
+            } else if (change.text.length === 0 && this.modeManager.isInsertMode) {
+                requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
+                requests.push(["nvim_feedkeys", [String.fromCharCode(8).repeat(change.rangeLength), "nt", 1]]);
+                newTicks++;
+            } else {
+                requests.push([
+                    "nvim_buf_set_text",
+                    [bufId, start.line, startBytes, end.line, endBytes, change.text.split(eol)],
+                ]);
+                newTicks++;
+            }
         }
-        const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
-        if (!bufTick) {
-            this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
-            return;
-        }
+
         this.logger.debug(
-            `${LOG_PREFIX}: BufId: ${bufId}, lineChanges: ${requests.length}, tick: ${bufTick}, skipTick: ${
+            `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
                 bufTick + requests.length
             }`,
         );
-        this.bufferSkipTicks.set(bufId, bufTick + requests.length);
+        this.bufferSkipTicks.set(bufId, bufTick + newTicks);
 
         if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     };
