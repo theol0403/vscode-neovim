@@ -108,6 +108,15 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         return (this.textDocumentChangePromise.get(doc)?.length || 0) > 0;
     }
 
+    public async setBufferSkipTick(bufId: number): Promise<void> {
+        const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
+        if (!bufTick) {
+            this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
+            return;
+        }
+        this.bufferSkipTicks.set(bufId, bufTick);
+    }
+
     public addBufferSkipTick(bufId: number, ticks: number): void {
         this.bufferSkipTicks.set(bufId, (this.bufferSkipTicks.get(bufId) ?? 0) + ticks);
     }
@@ -156,12 +165,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 continue;
             }
 
-            const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
-            if (!bufTick) {
-                this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
-                return;
-            }
-            this.bufferSkipTicks.set(bufId, bufTick);
+            await this.setBufferSkipTick(bufId);
 
             const newText = doc.getText();
             this.documentContentInNeovim.set(doc, newText);
@@ -214,11 +218,11 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                         "nvim_buf_set_text",
                         [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
                     ]);
+                } else {
+                    await this.setBufferSkipTick(bufId);
                 }
 
-                this.logger.debug(
-                    `${LOG_PREFIX}: BufId: ${bufId}, tick: ${bufTick}, skipTick: ${this.bufferSkipTicks.get(bufId)}`,
-                );
+                this.logger.debug(`${LOG_PREFIX}: BufId: ${bufId},  skipTick: ${this.bufferSkipTicks.get(bufId)}`);
             }
         }
 
