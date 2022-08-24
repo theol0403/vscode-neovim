@@ -434,14 +434,14 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
             if (change.rangeLength === 0 && this.modeManager.isInsertMode) {
-                requests.push(["nvim_feedkeys", [change.text, "nt", 1]]);
+                requests.push(["nvim_input", [change.text]]);
                 newTicks += change.text.length;
             } else if (change.text.length === 0 && this.modeManager.isInsertMode) {
                 const neovimCursor = await getNeovimCursor(this.client);
                 const cursor = new Position(neovimCursor[0], neovimCursor[1]);
                 if (end.isBeforeOrEqual(cursor)) {
                     // we deleted using backspace
-                    requests.push(["nvim_feedkeys", [String.fromCharCode(8).repeat(change.rangeLength), "nt", 1]]);
+                    requests.push(["nvim_input", ["<BS>".repeat(change.rangeLength)]]);
                 } else {
                     // we deleted using delete
                     requests.push(["nvim_input", ["<Del>".repeat(change.rangeLength)]]);
