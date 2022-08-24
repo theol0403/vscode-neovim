@@ -440,11 +440,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             const end = change.range.end;
 
             // vscode indexes by character, but neovim indexes by byte
-            // count the number of bytes in the line to get the neovim index
-            const startText = origText.split(eol)[start.line].slice(0, start.character);
-            const startBytes = Buffer.byteLength(startText, "utf8");
-            const endText = origText.split(eol)[end.line].slice(0, end.character);
-            const endBytes = Buffer.byteLength(endText, "utf8");
+            const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
+            const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
             if (change.rangeLength === 0 && this.modeManager.isInsertMode) {
                 requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
