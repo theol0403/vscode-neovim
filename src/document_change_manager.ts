@@ -22,10 +22,12 @@ import {
     applyEditorDiffOperations,
     callAtomic,
     computeEditorOperationsFromDiff,
+    convertCharNumToByteNum,
     diffLineToChars,
     getDocumentLineArray,
     prepareEditRangesFromDiff,
 } from "./utils";
+import { getNeovimCursor } from "./test/utils";
 
 const LOG_PREFIX = "DocumentChangeManager";
 
@@ -446,11 +448,20 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             if (change.rangeLength === 0 && this.modeManager.isInsertMode) {
                 requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
                 requests.push(["nvim_feedkeys", [change.text, "nt", 1]]);
-                newTicks++;
+                newTicks += change.text.length;
             } else if (change.text.length === 0 && this.modeManager.isInsertMode) {
-                requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
-                requests.push(["nvim_feedkeys", [String.fromCharCode(8).repeat(change.rangeLength), "nt", 1]]);
-                newTicks++;
+                const neovimCursor = await getNeovimCursor(this.client);
+                const cursor = new Position(neovimCursor[0], neovimCursor[1]);
+                if (end.isBeforeOrEqual(cursor)) {
+                    // we deleted using backspace
+                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
+                    requests.push(["nvim_feedkeys", [String.fromCharCode(8).repeat(change.rangeLength), "nt", 1]]);
+                } else {
+                    // we deleted using delete
+                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
+                    requests.push(["nvim_input", ["<Del>".repeat(change.rangeLength)]]);
+                }
+                newTicks += change.rangeLength;
             } else {
                 requests.push([
                     "nvim_buf_set_text",
@@ -461,9 +472,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         }
 
         this.logger.debug(
-            `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
-                bufTick + requests.length
-            }`,
+            `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${bufTick + newTicks}`,
         );
         this.bufferSkipTicks.set(bufId, bufTick + newTicks);
 
