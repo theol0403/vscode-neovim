@@ -108,6 +108,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         return (this.textDocumentChangePromise.get(doc)?.length || 0) > 0;
     }
 
+    public addBufferSkipTick(bufId: number, ticks: number): void {
+        this.bufferSkipTicks.set(bufId, (this.bufferSkipTicks.get(bufId) ?? 0) + ticks);
+    }
+
     public async handleExtensionRequest(): Promise<void> {
         // skip
     }
@@ -157,14 +161,13 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 this.logger.warn(`${LOG_PREFIX}: Can't get changed tick for bufId: ${bufId}, deleted?`);
                 return;
             }
+            this.bufferSkipTicks.set(bufId, bufTick);
 
             const newText = doc.getText();
             this.documentContentInNeovim.set(doc, newText);
 
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
             const changes = calcDiffWithPosition(origText, newText, eol);
-
-            let newTicks = 0;
 
             for (const [start, end, text, rangeLength] of changes) {
                 // vscode indexes by character, but neovim indexes by byte
@@ -175,12 +178,15 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
                 // if currently editing active doc, try to replay typing to preserve dot repeat
                 if (activeEditor.document == doc) {
+                    // also update cursor position on exit
+                    requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
                     if (rangeLength == 0) {
+                        this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
                         await this.client.request("nvim_win_set_cursor", [winId, [start.line + 1, start.character]]);
                         await this.client.input(text.replace(eol, "<CR>"));
-                        newTicks;
                         typedChange = true;
                     } else if (text === "") {
+                        this.addBufferSkipTick(bufId, rangeLength);
                         const neovimCursor = await getNeovimCursor(this.client);
                         const cursor = new Position(neovimCursor[0], neovimCursor[1]);
                         if (end.isBeforeOrEqual(cursor)) {
@@ -198,26 +204,21 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                             ]);
                             await this.client.input(text.replace(eol, "<Del>".repeat(rangeLength)));
                         }
-                        newTicks++;
                         typedChange = true;
                     }
-                    requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
                 }
 
                 if (!typedChange) {
+                    this.addBufferSkipTick(bufId, 1);
                     requests.push([
                         "nvim_buf_set_text",
                         [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
                     ]);
-                    newTicks++;
                 }
 
                 this.logger.debug(
-                    `${LOG_PREFIX}: BufId: ${bufId}, newTicks: ${newTicks}, tick: ${bufTick}, skipTick: ${
-                        bufTick + newTicks
-                    }`,
+                    `${LOG_PREFIX}: BufId: ${bufId}, tick: ${bufTick}, skipTick: ${this.bufferSkipTicks.get(bufId)}`,
                 );
-                this.bufferSkipTicks.set(bufId, bufTick + newTicks);
             }
         }
 
