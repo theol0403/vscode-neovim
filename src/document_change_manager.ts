@@ -251,6 +251,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     const eol = doc.eol === EndOfLine.CRLF ? "\r\n" : "\n";
                     const newText = newLines.join(eol);
 
+                    const splitText = oldText.split(eol);
+
                     const changes = Array.from(calcPatch(oldText, newText));
 
                     if (!changes.length) {
@@ -261,8 +263,21 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     const cursorBefore = editor.selection.active;
                     const success = await editor.edit(
                         (builder) => {
-                            for (const change in changes) {
-                                if (change[0] === change[1]) builder.insert(new Position(0, 0), "");
+                            for (const change of changes) {
+                                const lineStart = oldText.slice(0, change[0]).split(eol).length - 1;
+                                const lineEnd = oldText.slice(0, change[1]).split(eol).length - 1;
+                                const charStart = change[0] - splitText.slice(0, lineStart).join(eol).length;
+                                const charEnd = change[1] - splitText.slice(0, lineEnd).join(eol).length;
+                                if (change[0] === change[1]) {
+                                    builder.insert(new Position(lineStart, charStart), change[2]);
+                                    console.log("insert", lineStart, charStart, change[2]);
+                                } else if (change[2] === "") {
+                                    builder.delete(new Range(lineStart, charStart, lineEnd, charEnd));
+                                    console.log("delete", lineStart, charStart, lineEnd, charEnd);
+                                } else {
+                                    builder.replace(new Range(lineStart, charStart, lineEnd, charEnd), change[2]);
+                                    console.log("replace", lineStart, charStart, lineEnd, charEnd, change[2]);
+                                }
                             }
                         },
                         { undoStopAfter: false, undoStopBefore: false },

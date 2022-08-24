@@ -7,6 +7,8 @@ import { Logger } from "./logger";
 export const EXT_NAME = "vscode-neovim";
 export const EXT_ID = `asvetliakov.${EXT_NAME}`;
 
+export type GridLineEvent = [number, number, number, [string, number, number][]];
+
 function getBytesFromCodePoint(point?: number): number {
     if (point == null) {
         return 0;
