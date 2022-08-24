@@ -286,7 +286,7 @@ export class CursorManager
     };
 
     private onSelectionChanged = async (e: TextEditorSelectionChangeEvent): Promise<void> => {
-        if (this.modeManager.isInsertMode || this.ignoreSelectionEvents) return;
+        if (this.ignoreSelectionEvents) return;
 
         const { textEditor, kind } = e;
         this.logger.debug(`${LOG_PREFIX}: SelectionChanged`);

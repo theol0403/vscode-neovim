@@ -400,12 +400,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             return;
         }
 
-        const activeEditor = window.activeTextEditor;
-        if (!activeEditor) {
-            this.logger.warn(`${LOG_PREFIX}: No active editor, skipping`);
-            return;
-        }
-
         const origText = this.documentContentInNeovim.get(doc);
         if (origText == null) {
             this.logger.warn(`${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`);
@@ -415,12 +409,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         const bufId = this.bufferManager.getBufferIdForTextDocument(doc);
         if (!bufId) {
             this.logger.warn(`${LOG_PREFIX}: No neovim buffer for ${doc.uri.toString()}`);
-            return;
-        }
-
-        const winId = this.bufferManager.getWinIdForTextEditor(activeEditor);
-        if (!winId) {
-            this.logger.warn(`${LOG_PREFIX}: No neovim window for ${doc.uri.toString()}`);
             return;
         }
 
@@ -446,7 +434,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
             if (change.rangeLength === 0 && this.modeManager.isInsertMode) {
-                requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
                 requests.push(["nvim_feedkeys", [change.text, "nt", 1]]);
                 newTicks += change.text.length;
             } else if (change.text.length === 0 && this.modeManager.isInsertMode) {
@@ -454,11 +441,9 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 const cursor = new Position(neovimCursor[0], neovimCursor[1]);
                 if (end.isBeforeOrEqual(cursor)) {
                     // we deleted using backspace
-                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character + 1]]]);
                     requests.push(["nvim_feedkeys", [String.fromCharCode(8).repeat(change.rangeLength), "nt", 1]]);
                 } else {
                     // we deleted using delete
-                    requests.push(["nvim_win_set_cursor", [winId, [start.line + 1, start.character]]]);
                     requests.push(["nvim_input", ["<Del>".repeat(change.rangeLength)]]);
                 }
                 newTicks += change.rangeLength;
