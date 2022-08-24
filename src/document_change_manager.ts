@@ -8,6 +8,7 @@ import {
     Selection,
     TextDocument,
     TextDocumentChangeEvent,
+    TextDocumentContentChangeEvent,
     window,
     workspace,
 } from "vscode";
@@ -69,7 +70,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     /**
      * Set of changed documents since last neovim sync
      */
-    private changedDocuments: Set<TextDocument> = new Set();
+    private changedDocuments: Map<TextDocument, Array<TextDocumentContentChangeEvent>> = new Map();
     /**
      * True when we're currently applying edits, so incoming changes will go into pending events queue
      */
@@ -132,7 +133,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         const changedDocs = [...this.changedDocuments];
         this.changedDocuments.clear();
 
-        for (const doc of changedDocs) {
+        for (const [doc, changes] of changedDocs) {
             this.logger.debug(`${LOG_PREFIX}: Processing document ${doc.uri.toString()}`);
             if (doc.isClosed) {
                 this.logger.warn(`${LOG_PREFIX}: Document ${doc.uri.toString()} is closed, skipping`);
@@ -171,53 +172,61 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             this.documentContentInNeovim.set(doc, newText);
 
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
-            const changes = calcDiffWithPosition(origText, newText, eol);
 
-            // if the change is a continuous region, then we were typing. replay the typing to preserve dot repeat
-            if (changes.length == 1 && activeEditor.document == doc) {
-                const [start, end, text, rangeLength] = changes[0];
-                // first, delete the range we are typing over
-                if (rangeLength > 0) {
-                    this.addBufferSkipTick(bufId, rangeLength);
-                    const neovimCursor = await getNeovimCursor(this.client);
-                    const cursor = new Position(neovimCursor[0], neovimCursor[1]);
-                    if (end.isBeforeOrEqual(cursor)) {
-                        // we deleted using backspace
-                        await this.client.request("nvim_win_set_cursor", [
-                            winId,
-                            [start.line + 1, start.character + 1],
-                        ]);
-                        await this.client.input("<BS>".repeat(rangeLength));
-                    } else {
-                        // we deleted using delete
+            for (const change of changes) {
+                const start = change.range.start;
+                const end = change.range.end;
+                const text = change.text;
+                const rangeLength = change.rangeLength;
+
+                // vscode indexes by character, but neovim indexes by byte
+                const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
+                const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
+
+                let typedChange = false;
+
+                // if currently editing active doc, try to replay typing to preserve dot repeat
+                if (activeEditor.document == doc) {
+                    if (rangeLength == 0) {
+                        this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
                         await this.client.request("nvim_win_set_cursor", [winId, [start.line + 1, start.character]]);
-                        await this.client.input("<Del>".repeat(rangeLength));
+                        await this.client.input(text.replace(eol, "<CR>"));
+                        typedChange = true;
+                    } else if (text === "") {
+                        this.addBufferSkipTick(bufId, rangeLength);
+                        const neovimCursor = await getNeovimCursor(this.client);
+                        const cursor = new Position(neovimCursor[0], neovimCursor[1]);
+                        if (end.isBeforeOrEqual(cursor)) {
+                            // we deleted using backspace
+                            await this.client.request("nvim_win_set_cursor", [
+                                winId,
+                                [start.line + 1, start.character + 1],
+                            ]);
+                            await this.client.input("<BS>".repeat(rangeLength));
+                        } else {
+                            // we deleted using delete
+                            await this.client.request("nvim_win_set_cursor", [
+                                winId,
+                                [start.line + 1, start.character],
+                            ]);
+                            await this.client.input("<Del>".repeat(rangeLength));
+                        }
+                        typedChange = true;
                     }
+                    // also update cursor position on exit
+                    requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
                 }
-                // then, replace the range with any new text
-                if (text.length > 0) {
-                    this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
-                    await this.client.request("nvim_win_set_cursor", [winId, [start.line + 1, start.character]]);
-                    await this.client.input(text.replace(eol, "<CR>"));
-                }
-                // it is hard to predict how many ticks typing results in. just skip a bunch of ticks to be safe and then reset to the correct ticks after
-                await this.setBufferSkipTick(bufId);
-                // also update cursor position on exit
-                requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
-            } else {
-                for (const [start, end, text] of changes) {
-                    // vscode indexes by character, but neovim indexes by byte
-                    const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
-                    const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
+                if (!typedChange) {
                     this.addBufferSkipTick(bufId, 1);
                     requests.push([
                         "nvim_buf_set_text",
                         [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
                     ]);
+                } else {
+                    await this.setBufferSkipTick(bufId);
                 }
             }
-
             this.logger.debug(`${LOG_PREFIX}: BufId: ${bufId},  skipTick: ${this.bufferSkipTicks.get(bufId)}`);
         }
 
@@ -449,7 +458,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             return;
         }
 
-        this.changedDocuments.add(document);
+        if (!this.changedDocuments.has(document)) this.changedDocuments.set(document, [...contentChanges]);
+        else this.changedDocuments.get(document)!.push(...contentChanges);
 
         if (!this.modeManager.isInsertMode) {
             this.syncDocumentsWithNeovim();
