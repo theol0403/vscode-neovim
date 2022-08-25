@@ -74,7 +74,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     /**
      * Set of changed documents since last neovim sync
      */
-    private changedDocuments: Map<TextDocument, Array<TextDocumentContentChangeEvent>> = new Map();
+    private changedDocuments: Map<TextDocument, [TextDocumentContentChangeEvent[], string][]> = new Map();
     /**
      * Dot repeat workaround
      */
@@ -128,7 +128,7 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
         const changedDocs = [...this.changedDocuments];
         this.changedDocuments.clear();
 
-        for (const [doc, changes] of changedDocs) {
+        for (const [doc, updates] of changedDocs) {
             this.logger.debug(`${LOG_PREFIX}: Processing document ${doc.uri.toString()}`);
             if (doc.isClosed) {
                 this.logger.warn(`${LOG_PREFIX}: Document ${doc.uri.toString()} is closed, skipping`);
@@ -141,32 +141,23 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 continue;
             }
 
-            const origText = this.documentContentInNeovim.get(doc);
-            if (origText == null) {
-                this.logger.warn(
-                    `${LOG_PREFIX}: Can't get last known neovim content for ${doc.uri.toString()}, skipping`,
-                );
-                continue;
-            }
-
-            const newText = doc.getText();
-            this.documentContentInNeovim.set(doc, newText);
-
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
 
-            for (const change of changes) {
-                const start = change.range.start;
-                const end = change.range.end;
-                const text = change.text;
+            for (const [changes, origText] of updates) {
+                for (const change of changes) {
+                    const start = change.range.start;
+                    const end = change.range.end;
+                    const text = change.text;
 
-                // vscode indexes by character, but neovim indexes by byte
-                const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
-                const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
+                    // vscode indexes by character, but neovim indexes by byte
+                    const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
+                    const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
-                requests.push([
-                    "nvim_buf_set_text",
-                    [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
-                ]);
+                    requests.push([
+                        "nvim_buf_set_text",
+                        [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
+                    ]);
+                }
             }
 
             const bufTick: number = await this.client.request("nvim_buf_get_changedtick", [bufId]);
@@ -175,17 +166,16 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 continue;
             }
             this.bufferSkipTicks.set(bufId, bufTick + requests.length);
-
-            const activeEditor = window.activeTextEditor;
-            if (activeEditor && activeEditor.document === doc) {
-                requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(activeEditor)]]);
-            }
-
             this.logger.debug(
                 `${LOG_PREFIX}: BufId: ${bufId}, lineChanges: ${requests.length}, tick: ${bufTick}, skipTick: ${
                     bufTick + requests.length
                 }`,
             );
+
+            const activeEditor = window.activeTextEditor;
+            if (activeEditor && activeEditor.document === doc) {
+                requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(activeEditor)]]);
+            }
         }
 
         if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
@@ -484,8 +474,16 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             }
         }
 
+        const origText = this.documentContentInNeovim.get(document);
+        if (origText == null) {
+            this.logger.warn(`${LOG_PREFIX}: Can't get last known neovim content for ${document.uri.toString()}`);
+            return;
+        }
+
+        this.documentContentInNeovim.set(document, document.getText());
+
         if (!this.changedDocuments.has(document)) this.changedDocuments.set(document, []);
-        this.changedDocuments.get(document)!.push(...contentChanges);
+        this.changedDocuments.get(document)!.push([[...contentChanges], origText]);
 
         if (!this.modeManager.isInsertMode) {
             this.syncDocumentsWithNeovim();
