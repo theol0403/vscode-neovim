@@ -1,9 +1,18 @@
-import { workspace, TextEditor, Position, TextDocument, EndOfLine } from "vscode";
+import {
+    workspace,
+    TextEditor,
+    Position,
+    TextDocument,
+    EndOfLine,
+    TextDocumentChangeEvent,
+    TextDocumentContentChangeEvent,
+} from "vscode";
 import wcwidth from "ts-wcwidth";
 import { NeovimClient } from "neovim";
 import { calcPatch } from "fast-myers-diff";
 
 import { Logger } from "./logger";
+import { getNeovimCursor } from "./test/utils";
 
 export const EXT_NAME = "vscode-neovim";
 export const EXT_ID = `asvetliakov.${EXT_NAME}`;
@@ -33,6 +42,43 @@ export function calcDiffWithPosition(
         ]);
     }
     return diff;
+}
+
+export async function processDotRepeatChanges(
+    changes: TextDocumentContentChangeEvent[],
+    client: NeovimClient,
+): Promise<[TextDocumentContentChangeEvent[], string]> {
+    const neovimCursor = await getNeovimCursor(client);
+    let cursor = new Position(neovimCursor[0], neovimCursor[1]);
+    let i = 0;
+    let input = "";
+    for (const change of changes) {
+        const start = change.range.start;
+        const end = change.range.end;
+        const text = change.text;
+        const rangeLength = change.rangeLength;
+
+        console.log(`change ${i}: ${JSON.stringify(change)}`);
+        console.log(`cursor: ${cursor.line}, ${cursor.character}`);
+
+        if (rangeLength == 0 && start.isEqual(cursor)) {
+            input += text;
+            i++;
+            cursor = cursor.translate(0, text.length);
+        } else if (text === "" && start.isEqual(cursor.translate(0, -rangeLength))) {
+            input += "<BS>".repeat(rangeLength);
+            i++;
+            cursor = cursor.translate(0, rangeLength);
+        } else if (text === "" && end.isEqual(cursor.translate(0, rangeLength))) {
+            input += "<Del>".repeat(rangeLength);
+            i++;
+            cursor = cursor.translate(0, rangeLength);
+        } else {
+            return [changes.slice(i), input];
+        }
+    }
+
+    return [[], input];
 }
 
 function getBytesFromCodePoint(point?: number): number {

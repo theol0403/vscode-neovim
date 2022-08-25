@@ -24,6 +24,7 @@ import {
     convertCharNumToByteNum,
     getDocumentLineArray,
     getNeovimCursorPosFromEditor,
+    processDotRepeatChanges,
 } from "./utils";
 
 const LOG_PREFIX = "DocumentChangeManager";
@@ -173,59 +174,34 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
             const eol = doc.eol === EndOfLine.LF ? "\n" : "\r\n";
 
-            for (const change of changes) {
+            let newChanges = changes;
+
+            if (activeEditor.document === doc) {
+                const [trimmedChanges, text] = await processDotRepeatChanges(changes, this.client);
+                console.log("trimmedChanges", trimmedChanges);
+                newChanges = trimmedChanges;
+                if (text !== "") {
+                    console.log("text", text);
+                    this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
+                    await this.client.input(text.replace(eol, "<CR>"));
+                    await this.setBufferSkipTick(bufId);
+                }
+            }
+
+            for (const change of newChanges) {
                 const start = change.range.start;
                 const end = change.range.end;
                 const text = change.text;
-                const rangeLength = change.rangeLength;
 
                 // vscode indexes by character, but neovim indexes by byte
                 const startBytes = convertCharNumToByteNum(origText.split(eol)[start.line], start.character);
                 const endBytes = convertCharNumToByteNum(origText.split(eol)[end.line], end.character);
 
-                let typedChange = false;
-
-                // if currently editing active doc, try to replay typing to preserve dot repeat
-                if (activeEditor.document == doc) {
-                    if (rangeLength == 0) {
-                        this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
-                        await this.client.request("nvim_win_set_cursor", [winId, [start.line + 1, start.character]]);
-                        await this.client.input(text.replace(eol, "<CR>"));
-                        typedChange = true;
-                    } else if (text === "") {
-                        this.addBufferSkipTick(bufId, rangeLength);
-                        const neovimCursor = await getNeovimCursor(this.client);
-                        const cursor = new Position(neovimCursor[0], neovimCursor[1]);
-                        if (end.isBeforeOrEqual(cursor)) {
-                            // we deleted using backspace
-                            await this.client.request("nvim_win_set_cursor", [
-                                winId,
-                                [start.line + 1, start.character + 1],
-                            ]);
-                            await this.client.input("<BS>".repeat(rangeLength));
-                        } else {
-                            // we deleted using delete
-                            await this.client.request("nvim_win_set_cursor", [
-                                winId,
-                                [start.line + 1, start.character],
-                            ]);
-                            await this.client.input("<Del>".repeat(rangeLength));
-                        }
-                        typedChange = true;
-                    }
-                    // also update cursor position on exit
-                    requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
-                }
-
-                if (!typedChange) {
-                    this.addBufferSkipTick(bufId, 1);
-                    requests.push([
-                        "nvim_buf_set_text",
-                        [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
-                    ]);
-                } else {
-                    await this.setBufferSkipTick(bufId);
-                }
+                this.addBufferSkipTick(bufId, 1);
+                requests.push([
+                    "nvim_buf_set_text",
+                    [bufId, start.line, startBytes, end.line, endBytes, text.split(eol)],
+                ]);
             }
             this.logger.debug(`${LOG_PREFIX}: BufId: ${bufId},  skipTick: ${this.bufferSkipTicks.get(bufId)}`);
         }
