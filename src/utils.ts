@@ -85,7 +85,8 @@ export async function processDotRepeatChanges(
             cursorIndex += text.length;
             origText = origText.slice(0, startIndex) + text + origText.slice(endIndex);
         } else if (text === "" && startIndex === cursorIndex - rangeLength) {
-            input += "<BS>".repeat(rangeLength);
+            if (input.length >= rangeLength) input = input.slice(0, input.length - rangeLength);
+            else input += "<BS>".repeat(rangeLength);
             skipChange++;
             cursorIndex -= rangeLength;
             origText = origText.slice(0, startIndex) + origText.slice(endIndex);

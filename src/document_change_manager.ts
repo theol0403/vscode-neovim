@@ -178,10 +178,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
             if (activeEditor.document === doc) {
                 const [trimmedChanges, text] = await processDotRepeatChanges(changes, origText, eol, this.client);
-                console.log("trimmedChanges", trimmedChanges);
                 newChanges = trimmedChanges;
                 if (text !== "") {
-                    console.log("text", text);
                     this.addBufferSkipTick(bufId, text.replace(eol, " ").length);
                     await this.client.input(text.replace(eol, "<CR>"));
                     await this.setBufferSkipTick(bufId);
