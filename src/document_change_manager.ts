@@ -171,12 +171,10 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     bufTick + requests.length
                 }`,
             );
-
-            const activeEditor = window.activeTextEditor;
-            if (activeEditor && activeEditor.document === doc) {
-                requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(activeEditor)]]);
-            }
         }
+
+        if (window.activeTextEditor)
+            requests.push(["nvim_win_set_cursor", [0, getNeovimCursorPosFromEditor(window.activeTextEditor)]]);
 
         if (requests.length) await callAtomic(this.client, requests, this.logger, LOG_PREFIX);
     }
