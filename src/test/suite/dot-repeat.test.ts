@@ -194,7 +194,8 @@ describe("Dot-repeat", () => {
         await setSelection([{ anchorPos: [0, 0], cursorPos: [0, 3] }]);
         await copyVSCodeSelection();
 
-        await setSelection([{ anchorPos: [0, 3], cursorPos: [0, 3] }]);
+        await sendEscapeKey();
+        await sendVSCodeKeys("A");
         await pasteVSCode();
         await sendVSCodeSpecialKey("backspace");
         await sendEscapeKey();
@@ -218,8 +219,9 @@ describe("Dot-repeat", () => {
         await sendVSCodeKeys("I");
         await setSelection([{ anchorPos: [0, 0], cursorPos: [1, 4] }]);
         await copyVSCodeSelection();
+        await sendEscapeKey();
 
-        await setSelection([{ anchorPos: [1, 4], cursorPos: [1, 4] }]);
+        await sendVSCodeKeys("A");
         await pasteVSCode();
         await sendVSCodeSpecialKey("backspace");
         await sendEscapeKey();
