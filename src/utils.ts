@@ -6,6 +6,7 @@ import {
     EndOfLine,
     TextDocumentChangeEvent,
     TextDocumentContentChangeEvent,
+    Range,
 } from "vscode";
 import wcwidth from "ts-wcwidth";
 import { NeovimClient } from "neovim";
@@ -46,11 +47,22 @@ export function calcDiffWithPosition(
 
 export async function processDotRepeatChanges(
     changes: TextDocumentContentChangeEvent[],
+    origText: string,
+    eol: string,
     client: NeovimClient,
 ): Promise<[TextDocumentContentChangeEvent[], string]> {
     const neovimCursor = await getNeovimCursor(client);
-    let cursor = new Position(neovimCursor[0], neovimCursor[1]);
-    let i = 0;
+    const cursor = new Position(neovimCursor[0], neovimCursor[1]);
+    let cursorIndex =
+        cursor.line > 0
+            ? origText
+                  .split(eol)
+                  .slice(0, cursor.line - 1)
+                  .join(eol).length +
+              cursor.character +
+              eol.length
+            : cursor.character;
+    let skipChange = 0;
     let input = "";
     for (const change of changes) {
         const start = change.range.start;
@@ -58,23 +70,31 @@ export async function processDotRepeatChanges(
         const text = change.text;
         const rangeLength = change.rangeLength;
 
-        console.log(`change ${i}: ${JSON.stringify(change)}`);
-        console.log(`cursor: ${cursor.line}, ${cursor.character}`);
+        const startIndex =
+            start.line > 0
+                ? origText.split(eol).slice(0, start.line).join(eol).length + start.character + eol.length
+                : start.character;
+        const endIndex =
+            end.line > 0
+                ? origText.split(eol).slice(0, end.line).join(eol).length + end.character + eol.length
+                : end.character;
 
-        if (rangeLength == 0 && start.isEqual(cursor)) {
+        if (rangeLength == 0 && startIndex === cursorIndex) {
             input += text;
-            i++;
-            cursor = cursor.translate(0, text.length);
-        } else if (text === "" && start.isEqual(cursor.translate(0, -rangeLength))) {
+            skipChange++;
+            cursorIndex += text.length;
+            origText = origText.slice(0, startIndex) + text + origText.slice(endIndex);
+        } else if (text === "" && startIndex === cursorIndex - rangeLength) {
             input += "<BS>".repeat(rangeLength);
-            i++;
-            cursor = cursor.translate(0, rangeLength);
-        } else if (text === "" && end.isEqual(cursor.translate(0, rangeLength))) {
+            skipChange++;
+            cursorIndex -= rangeLength;
+            origText = origText.slice(0, startIndex) + origText.slice(endIndex);
+        } else if (text === "" && endIndex === cursorIndex + rangeLength) {
             input += "<Del>".repeat(rangeLength);
-            i++;
-            cursor = cursor.translate(0, rangeLength);
+            skipChange++;
+            origText = origText.slice(0, startIndex) + origText.slice(endIndex);
         } else {
-            return [changes.slice(i), input];
+            return [changes.slice(skipChange), input];
         }
     }
 
