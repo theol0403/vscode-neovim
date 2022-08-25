@@ -55,12 +55,7 @@ export async function processDotRepeatChanges(
     const cursor = new Position(neovimCursor[0], neovimCursor[1]);
     let cursorIndex =
         cursor.line > 0
-            ? origText
-                  .split(eol)
-                  .slice(0, cursor.line - 1)
-                  .join(eol).length +
-              cursor.character +
-              eol.length
+            ? origText.split(eol).slice(0, cursor.line).join(eol).length + cursor.character + eol.length
             : cursor.character;
     let skipChange = 0;
     let input = "";

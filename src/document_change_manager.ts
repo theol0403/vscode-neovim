@@ -184,6 +184,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     await this.client.input(text.replace(eol, "<CR>"));
                     await this.setBufferSkipTick(bufId);
                 }
+                // also update cursor position on exit
+                requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
             }
 
             for (const change of newChanges) {
