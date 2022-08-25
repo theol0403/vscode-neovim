@@ -202,7 +202,7 @@ describe("Dot-repeat", () => {
 
         await assertContent(
             {
-                content: ["ababcab"],
+                content: ["abcabab"],
             },
             client,
         );
