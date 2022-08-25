@@ -1,11 +1,11 @@
 import {
     workspace,
     TextEditor,
+    TextDocumentContentChangeEvent,
     Position,
     TextDocument,
     EndOfLine,
     TextDocumentChangeEvent,
-    TextDocumentContentChangeEvent,
     Range,
 } from "vscode";
 import wcwidth from "ts-wcwidth";
@@ -19,6 +19,28 @@ export const EXT_NAME = "vscode-neovim";
 export const EXT_ID = `asvetliakov.${EXT_NAME}`;
 
 export type GridLineEvent = [number, number, number, [string, number, number][]];
+
+/**
+ * Stores last changes information for dot repeat
+ */
+export interface DotRepeatChange {
+    /**
+     * Num of deleted characters, 0 when only added
+     */
+    rangeLength: number;
+    /**
+     * Range offset
+     */
+    rangeOffset: number;
+    /**
+     * Change text
+     */
+    text: string;
+    /**
+     * Text eol
+     */
+    eol: string;
+}
 
 export function calcDiffWithPosition(
     oldText: string,
@@ -43,57 +65,6 @@ export function calcDiffWithPosition(
         ]);
     }
     return diff;
-}
-
-export async function processDotRepeatChanges(
-    changes: TextDocumentContentChangeEvent[],
-    origText: string,
-    eol: string,
-    client: NeovimClient,
-): Promise<[TextDocumentContentChangeEvent[], string]> {
-    const neovimCursor = await getNeovimCursor(client);
-    const cursor = new Position(neovimCursor[0], neovimCursor[1]);
-    let cursorIndex =
-        cursor.line > 0
-            ? origText.split(eol).slice(0, cursor.line).join(eol).length + cursor.character + eol.length
-            : cursor.character;
-    let skipChange = 0;
-    let input = "";
-    for (const change of changes) {
-        const start = change.range.start;
-        const end = change.range.end;
-        const text = change.text;
-        const rangeLength = change.rangeLength;
-
-        const startIndex =
-            start.line > 0
-                ? origText.split(eol).slice(0, start.line).join(eol).length + start.character + eol.length
-                : start.character;
-        const endIndex =
-            end.line > 0
-                ? origText.split(eol).slice(0, end.line).join(eol).length + end.character + eol.length
-                : end.character;
-
-        if (rangeLength == 0 && startIndex === cursorIndex) {
-            input += text;
-            skipChange++;
-            cursorIndex += text.length;
-            origText = origText.slice(0, startIndex) + text + origText.slice(endIndex);
-        } else if (text === "" && startIndex === cursorIndex - rangeLength) {
-            input += "<BS>".repeat(rangeLength);
-            skipChange++;
-            cursorIndex -= rangeLength;
-            origText = origText.slice(0, startIndex) + origText.slice(endIndex);
-        } else if (text === "" && endIndex === cursorIndex + rangeLength) {
-            input += "<Del>".repeat(rangeLength);
-            skipChange++;
-            origText = origText.slice(0, startIndex) + origText.slice(endIndex);
-        } else {
-            return [changes.slice(skipChange), input];
-        }
-    }
-
-    return [[], input];
 }
 
 function getBytesFromCodePoint(point?: number): number {
@@ -176,6 +147,44 @@ export function calculateEditorColFromVimScreenCol(
     return currentCharIdx;
 }
 
+export function isChangeSubsequentToChange(
+    change: TextDocumentContentChangeEvent,
+    lastChange: DotRepeatChange,
+): boolean {
+    const lastChangeTextLength = lastChange.text.length;
+    const lastChangeOffsetStart = lastChange.rangeOffset;
+    const lastChangeOffsetEnd = lastChange.rangeOffset + lastChangeTextLength;
+
+    if (change.rangeOffset >= lastChangeOffsetStart && change.rangeOffset <= lastChangeOffsetEnd) {
+        return true;
+    }
+
+    if (
+        change.rangeOffset < lastChangeOffsetStart &&
+        change.rangeOffset + change.rangeLength >= lastChangeOffsetStart
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+export function isCursorChange(change: TextDocumentContentChangeEvent, cursor: Position, eol: string): boolean {
+    if (change.range.contains(cursor)) {
+        return true;
+    }
+    if (change.range.isSingleLine && change.text) {
+        const lines = change.text.split(eol);
+        const lineLength = lines.length;
+        const newEndLineRange = change.range.start.line + lineLength - 1;
+        const newEndLastLineCharRange = change.range.end.character + lines.slice(-1)[0].length;
+        if (newEndLineRange >= cursor.line && newEndLastLineCharRange >= cursor.character) {
+            return true;
+        }
+    }
+    return false;
+}
+
 type LegacySettingName = "neovimPath" | "neovimInitPath";
 type SettingPrefix = "neovimExecutablePaths" | "neovimInitVimPaths"; //this needs to be aligned with setting names in package.json
 type Platform = "win32" | "darwin" | "linux";
@@ -217,6 +226,50 @@ export function getNeovimInitPath(): string | undefined {
         vscodeSettingName: "neovimInitPath",
     } as const;
     return getSystemSpecificSetting("neovimInitVimPaths", legacySettingInfo);
+}
+
+export function normalizeDotRepeatChange(change: TextDocumentContentChangeEvent, eol: string): DotRepeatChange {
+    return {
+        rangeLength: change.rangeLength,
+        rangeOffset: change.rangeOffset,
+        text: change.text,
+        eol,
+    };
+}
+
+export function accumulateDotRepeatChange(
+    change: TextDocumentContentChangeEvent,
+    lastChange: DotRepeatChange,
+): DotRepeatChange {
+    const newLastChange: DotRepeatChange = {
+        ...lastChange,
+    };
+
+    const removedLength =
+        change.rangeOffset <= lastChange.rangeOffset
+            ? change.rangeOffset - lastChange.rangeOffset + change.rangeLength
+            : change.rangeLength;
+
+    const sliceBeforeStart = 0;
+    const sliceBeforeEnd =
+        change.rangeOffset <= lastChange.rangeOffset
+            ? // ? sliceBeforeStart + removedLength
+              0
+            : change.rangeOffset - lastChange.rangeOffset;
+
+    const sliceAfterStart = change.rangeOffset - lastChange.rangeOffset + removedLength;
+
+    // adjust text
+    newLastChange.text =
+        lastChange.text.slice(sliceBeforeStart, sliceBeforeEnd) + change.text + lastChange.text.slice(sliceAfterStart);
+
+    // adjust offset & range length
+    // we need to account the case only when text was deleted before the original change
+    if (change.rangeOffset < lastChange.rangeOffset) {
+        newLastChange.rangeOffset = change.rangeOffset;
+        newLastChange.rangeLength += change.rangeLength;
+    }
+    return newLastChange;
 }
 
 export function editorPositionToNeovimPosition(editor: TextEditor, position: Position): [number, number] {
