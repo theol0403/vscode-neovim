@@ -147,18 +147,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                 continue;
             }
 
-            const activeEditor = window.activeTextEditor;
-            if (!activeEditor) {
-                this.logger.warn(`${LOG_PREFIX}: No active editor, skipping`);
-                return;
-            }
-
-            const winId = this.bufferManager.getWinIdForTextEditor(activeEditor);
-            if (!winId) {
-                this.logger.warn(`${LOG_PREFIX}: No neovim window for ${doc.uri.toString()}`);
-                return;
-            }
-
             const origText = this.documentContentInNeovim.get(doc);
             if (origText == null) {
                 this.logger.warn(
@@ -176,7 +164,8 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
 
             let newChanges = changes;
 
-            if (activeEditor.document === doc) {
+            const activeEditor = window.activeTextEditor;
+            if (activeEditor && activeEditor.document === doc) {
                 const [trimmedChanges, text] = await processDotRepeatChanges(changes, origText, eol, this.client);
                 newChanges = trimmedChanges;
                 if (text !== "") {
@@ -184,7 +173,11 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
                     await this.client.input(text.replace(eol, "<CR>"));
                     await this.setBufferSkipTick(bufId);
                 }
-                // also update cursor position on exit
+                const winId = this.bufferManager.getWinIdForTextEditor(activeEditor);
+                if (!winId) {
+                    this.logger.warn(`${LOG_PREFIX}: No neovim window for ${doc.uri.toString()}`);
+                    continue;
+                }
                 requests.push(["nvim_win_set_cursor", [winId, getNeovimCursorPosFromEditor(activeEditor)]]);
             }
 
