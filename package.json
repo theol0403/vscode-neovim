@@ -1262,8 +1262,8 @@
         "yarn": "^1.22.18"
     },
     "dependencies": {
-        "fast-diff": "^1.2.0",
         "async-mutex": "^0.3.2",
+        "fast-myers-diff": "^3.0.1",
         "lodash-es": "^4.17.21",
         "neovim": "^4.9.0",
         "ts-wcwidth": "^2.0.3"

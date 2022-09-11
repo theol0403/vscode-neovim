@@ -1,4 +1,3 @@
-import diff from "fast-diff";
 import { NeovimClient } from "neovim";
 import {
     Disposable,
@@ -19,17 +18,14 @@ import { Logger } from "./logger";
 import { NeovimExtensionRequestProcessable } from "./neovim_events_processable";
 import {
     accumulateDotRepeatChange,
-    applyEditorDiffOperations,
+    calcDiffWithPosition,
     callAtomic,
-    computeEditorOperationsFromDiff,
-    diffLineToChars,
     convertCharNumToByteNum,
     DotRepeatChange,
     getDocumentLineArray,
     isChangeSubsequentToChange,
     isCursorChange,
     normalizeDotRepeatChange,
-    prepareEditRangesFromDiff,
 } from "./utils";
 import { MainController } from "./main_controller";
 
@@ -227,7 +223,6 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
     private applyEdits = async (): Promise<void> => {
         this.applyingEdits = true;
         this.logger.debug(`${LOG_PREFIX}: Applying neovim edits`);
-        // const edits = this.pendingEvents.splice(0);
         let resolveProgress: undefined | (() => void);
         const progressTimer = setTimeout(() => {
             window.withProgress<void>(
@@ -236,195 +231,73 @@ export class DocumentChangeManager implements Disposable, NeovimExtensionRequest
             );
         }, 1000);
 
-        while (this.pendingEvents.length) {
-            const newTextByDoc: Map<TextDocument, string[]> = new Map();
+        let edit = this.pendingEvents.shift();
+        while (edit) {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            let edit = this.pendingEvents.shift();
-            while (edit) {
-                // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const [bufId, _tick, firstLine, lastLine, data, _more] = edit;
-                const doc = this.main.bufferManager.getTextDocumentForBufferId(bufId);
-                if (!doc) {
-                    this.logger.warn(`${LOG_PREFIX}: No document for ${bufId}, skip`);
-                    continue;
-                }
-                this.logger.debug(`${LOG_PREFIX}: Accumulating edits for ${doc.uri.toString()}, bufId: ${bufId}`);
-                if (!newTextByDoc.get(doc)) {
-                    newTextByDoc.set(doc, getDocumentLineArray(doc));
-                }
-                let lines = newTextByDoc.get(doc)!;
-                // nvim sends following:
-                // 1. string change - firstLine is the changed line , lastLine + 1
-                // 2. cleaned line but not deleted - first line is the changed line, lastLine + 1, linedata is ""
-                // 3. newline insert - firstLine = lastLine and linedata is "" or new data
-                // 4. line deleted - firstLine is changed line, lastLine + 1, linedata is empty []
-                // 5. multiple empty lines deleted (sometimes happens), firstLine is changedLine - shouldn't be deleted, lastLine + 1, linedata is ""
-                // LAST LINE is exclusive and can be out of the last editor line
-                if (firstLine !== lastLine && lastLine === firstLine + 1 && data.length === 1 && data[0] === "") {
-                    // 2
-                    for (let line = firstLine; line < lastLine; line++) {
-                        lines[line] = "";
-                    }
-                } else if (firstLine !== lastLine && data.length === 1 && data[0] === "") {
-                    // 5
-                    for (let line = 1; line < lastLine - firstLine; line++) {
-                        lines.splice(firstLine, 1);
-                    }
-                    lines[firstLine] = "";
-                } else if (firstLine !== lastLine && !data.length) {
-                    // 4
-                    for (let line = 0; line < lastLine - firstLine; line++) {
-                        lines.splice(firstLine, 1);
-                    }
-                } else if (firstLine === lastLine) {
-                    // 3
-                    if (firstLine > lines.length) {
-                        data.unshift("");
-                    }
-                    if (firstLine === 0) {
-                        lines.unshift(...data);
-                    } else {
-                        lines = [...lines.slice(0, firstLine), ...data, ...lines.slice(firstLine)];
-                    }
-                } else {
-                    // 1 or 3
-                    // handle when change is overflow through editor lines. E.g. pasting on last line.
-                    // Without newline it will append to the current one
-                    if (firstLine >= lines.length) {
-                        data.unshift("");
-                    }
-                    lines = [...lines.slice(0, firstLine), ...data, ...lines.slice(lastLine)];
-                }
-                newTextByDoc.set(doc, lines);
-                edit = this.pendingEvents.shift();
+            const [bufId, _tick, firstLine, lastLine, data, _more] = edit;
+            const doc = this.main.bufferManager.getTextDocumentForBufferId(bufId);
+            if (!doc) {
+                this.logger.warn(`${LOG_PREFIX}: No document for ${bufId}, skip`);
+                continue;
             }
-            // replacing lines with WorkspaceEdit() moves cursor to the end of the line, unfortunately this won't work
-            // const workspaceEdit = new vscode.WorkspaceEdit();
-            for (const [doc, newLines] of newTextByDoc) {
-                const lastPromiseIdx = this.textDocumentChangePromise.get(doc)?.length || 0;
-                try {
-                    this.logger.debug(`${LOG_PREFIX}: Applying edits for ${doc.uri.toString()}`);
-                    if (doc.isClosed) {
-                        this.logger.debug(`${LOG_PREFIX}: Document was closed, skippnig`);
-                        continue;
-                    }
-                    const editor = window.visibleTextEditors.find((e) => e.document === doc);
-                    if (!editor) {
-                        this.logger.debug(`${LOG_PREFIX}: No visible text editor for document, skipping`);
-                        continue;
-                    }
-                    let oldText = doc.getText();
-                    const eol = doc.eol === EndOfLine.CRLF ? "\r\n" : "\n";
-                    let newText = newLines.join(eol);
-                    // add few lines to the end otherwise diff may be wrong for a newline characters
-                    oldText += `${eol}end${eol}end`;
-                    newText += `${eol}end${eol}end`;
-                    const diffPrepare = diffLineToChars(oldText, newText);
-                    const d = diff(diffPrepare.chars1, diffPrepare.chars2);
-                    const ranges = prepareEditRangesFromDiff(d);
-                    if (!ranges.length) {
-                        continue;
+            const editor = window.visibleTextEditors.find((e) => e.document === doc);
+            if (!editor) {
+                this.logger.debug(`${LOG_PREFIX}: No visible text editor for document, skipping`);
+                continue;
+            }
+            this.logger.debug(`${LOG_PREFIX}: Accumulating edits for ${doc.uri.toString()}, bufId: ${bufId}`);
+            // nvim sends following:
+            // 1. string change - firstLine is the changed line , lastLine + 1
+            // 2. cleaned line but not deleted - first line is the changed line, lastLine + 1, linedata is ""
+            // 3. newline insert - firstLine = lastLine and linedata is "" or new data
+            // 4. line deleted - firstLine is changed line, lastLine + 1, linedata is empty []
+            // 5. multiple empty lines deleted (sometimes happens), firstLine is changedLine - shouldn't be deleted, lastLine + 1, linedata is ""
+            // LAST LINE is exclusive and can be out of the last editor line
+            const success = await editor.edit(
+                (builder) => {
+                    if (firstLine === lastLine) {
+                        // 3.
+                        if (firstLine >= doc.lineCount) {
+                            builder.insert(new Position(firstLine, 0), "\n" + data.join("\n"));
+                        } else {
+                            builder.insert(new Position(firstLine, 0), data.join("\n") + "\n");
+                        }
+                    } else if (firstLine !== lastLine && !data.length) {
+                        // 4.
+                        builder.delete(new Range(firstLine, 0, lastLine, 0));
+                        if (lastLine >= doc.lineCount) {
+                            builder.delete(new Range(firstLine - 1, 999999, firstLine, 0));
+                        }
+                    } else {
+                        const changes = calcDiffWithPosition(
+                            doc.getText(new Range(firstLine, 0, lastLine - 1, 999999)),
+                            data.join("\n"),
+                        );
+                        for (const change of changes) {
+                            builder.replace(
+                                new Range(change.start.translate(firstLine, 0), change.end.translate(firstLine, 0)),
+                                change.text,
+                            );
+                        }
                     }
                     this.documentSkipVersionOnChange.set(doc, doc.version + 1);
-
-                    const cursorBefore = editor.selection.active;
-                    const success = await editor.edit(
-                        (builder) => {
-                            for (const range of ranges) {
-                                const text = newLines.slice(range.newStart, range.newEnd + 1);
-                                if (range.type === "removed") {
-                                    if (range.end >= editor.document.lineCount - 1 && range.start > 0) {
-                                        const startChar = editor.document.lineAt(range.start - 1).range.end.character;
-                                        builder.delete(new Range(range.start - 1, startChar, range.end, 999999));
-                                    } else {
-                                        builder.delete(new Range(range.start, 0, range.end + 1, 0));
-                                    }
-                                } else if (range.type === "changed") {
-                                    // builder.delete(new Range(range.start, 0, range.end, 999999));
-                                    // builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() can select text. This usually happens when you add something at end of a line
-                                    // !We're trying to mitigate it here by checking if we're just adding characters and using insert() instead
-                                    // !As fallback we look after applying edits if we have selection
-                                    const oldText = editor.document
-                                        .getText(new Range(range.start, 0, range.end, 99999))
-                                        .replace("\r\n", "\n");
-                                    const newText = text.join("\n");
-                                    if (newText.length > oldText.length && newText.startsWith(oldText)) {
-                                        builder.insert(
-                                            new Position(range.start, oldText.length),
-                                            newText.slice(oldText.length),
-                                        );
-                                    } else {
-                                        const changeSpansOneLineOnly =
-                                            range.start == range.end && range.newStart == range.newEnd;
-
-                                        let editorOps;
-
-                                        if (changeSpansOneLineOnly) {
-                                            editorOps = computeEditorOperationsFromDiff(diff(oldText, newText));
-                                        }
-
-                                        // If supported, efficiently modify only part of line that has changed by
-                                        // generating a diff and computing editor operations from it. This prevents
-                                        // flashes of non syntax-highlighted text (e.g. when `x` or `cw`, only
-                                        // remove a single char/the word).
-                                        if (editorOps && changeSpansOneLineOnly) {
-                                            applyEditorDiffOperations(builder, { editorOps, line: range.newStart });
-                                        } else {
-                                            builder.replace(
-                                                new Range(range.start, 0, range.end, 999999),
-                                                text.join("\n"),
-                                            );
-                                        }
-                                    }
-                                } else if (range.type === "added") {
-                                    if (range.start >= editor.document.lineCount) {
-                                        text.unshift(
-                                            ...new Array(range.start - (editor.document.lineCount - 1)).fill(""),
-                                        );
-                                    } else {
-                                        text.push("");
-                                    }
-                                    builder.insert(new Position(range.start, 0), text.join("\n"));
-                                    // !builder.replace() selects text
-                                    // builder.replace(new Position(range.start, 0), text.join("\n"));
-                                }
-                            }
-                        },
-                        { undoStopAfter: false, undoStopBefore: false },
-                    );
-                    const docPromises = this.textDocumentChangePromise.get(doc)?.splice(0, lastPromiseIdx) || [];
-                    if (success) {
-                        if (!editor.selection.anchor.isEqual(editor.selection.active)) {
-                            editor.selections = [new Selection(editor.selection.active, editor.selection.active)];
-                        } else {
-                            // Some editor operations change cursor position. This confuses cursor
-                            // sync from Vim to Code (e.g. when cursor did not change in Vim but
-                            // changed in Code). Fix by forcing cursor position to stay the same
-                            // indepent of the diff operation in question.
-                            editor.selections = [new Selection(cursorBefore, cursorBefore)];
-                        }
-                        this.cursorAfterTextDocumentChange.set(editor.document, editor.selection.active);
-                        docPromises.forEach((p) => p.resolve && p.resolve());
-                        this.logger.debug(`${LOG_PREFIX}: Changes succesfully applied for ${doc.uri.toString()}`);
-                        this.documentContentInNeovim.set(doc, doc.getText());
-                    } else {
-                        docPromises.forEach((p) => {
-                            p.promise?.catch(() =>
-                                this.logger.warn(`${LOG_PREFIX}: Edit was canceled for doc: ${doc.uri.toString()}`),
-                            );
-                            p.reject && p.reject();
-                        });
-                        this.logger.warn(`${LOG_PREFIX}: Changes were not applied for ${doc.uri.toString()}`);
-                    }
-                } catch (e) {
-                    this.logger.error(`${LOG_PREFIX}: Error applying neovim edits, error: ${(e as Error).message}`);
-                }
+                },
+                { undoStopAfter: false, undoStopBefore: true }, // turn off
+            );
+            if (success) {
+                const neovimCursorPos =
+                    this.main.cursorManager.neovimCursorPosition.get(editor) ?? editor.selection.active;
+                this.cursorAfterTextDocumentChange.set(editor.document, neovimCursorPos);
+                editor.selection = new Selection(neovimCursorPos, neovimCursorPos);
+                this.logger.debug(`${LOG_PREFIX}: Changes successfully applied for ${doc.uri.toString()}`);
+                this.documentContentInNeovim.set(doc, doc.getText());
+            } else {
+                this.logger.warn(`${LOG_PREFIX}: Changes were not applied for ${doc.uri.toString()}`);
             }
+            edit = this.pendingEvents.shift();
         }
-        const promises = [...this.textDocumentChangePromise.values()].flatMap((p) => p);
+        this.textDocumentChangePromise.forEach((p) => p.forEach((p) => p.resolve?.()));
         this.textDocumentChangePromise.clear();
-        promises.forEach((p) => p.resolve && p.resolve());
         // better to be safe - if event was inserted after exit the while() block but before exit the function
         if (progressTimer) {
             clearTimeout(progressTimer);
