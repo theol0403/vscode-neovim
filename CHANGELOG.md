@@ -4,6 +4,19 @@
 
 -   change default binding for moving editor to above group (from <C-w><C-i> to <C-w><C-k>) (#1119)
 
+## [0.1.0](https://github.com/theol0403/vscode-neovim/compare/v0.0.96...v0.1.0) (2023-06-27)
+
+
+### Features
+
+* add $NVIM_APPNAME option ([#1186](https://github.com/theol0403/vscode-neovim/issues/1186)) ([5b54212](https://github.com/theol0403/vscode-neovim/commit/5b5421201701be67fc92d42b39fb049708b4d0f1))
+* **ci:** add automatic releases ([ed658b3](https://github.com/theol0403/vscode-neovim/commit/ed658b3307cf418a24b46000f2bb961451ad4f3e))
+
+
+### Bug Fixes
+
+* wrong VSCode selections if cursor is at start of selection [#1180](https://github.com/theol0403/vscode-neovim/issues/1180) ([f9bcd25](https://github.com/theol0403/vscode-neovim/commit/f9bcd2555c01ad238d9eca06f1c051c43ee71b15))
+
 ## [0.0.96]
 
 -   fix issues with tabs creating visual glitches (#1099)
