@@ -75,6 +75,7 @@ jobs:
               with:
                   release-type: node
                   package-name: vscode-neovim
+                  token: ${{ secrets.RELEASE_PLEASE_KEY }}
             - uses: actions/checkout@v3
               if: ${{ steps.release.outputs.release_created }}
             - uses: actions/setup-node@v3
@@ -82,9 +83,6 @@ jobs:
               with:
                   node-version: "14"
                   cache: "npm"
-            - name: vsce publish
-              if: ${{ steps.release.outputs.release_created }}
-              run: npx vsce publish
             - name: Upload Release Artifact
               if: ${{ steps.release.outputs.release_created }}
               env:
@@ -92,3 +90,6 @@ jobs:
               run:
                   gh release upload ${{ steps.release.outputs.tag_name }}
                   vscode-neovim-${{steps.release.outputs.tag_name}}.vsix
+            - name: vsce publish
+              if: ${{ steps.release.outputs.release_created }}
+              run: npx vsce publish
