@@ -84,6 +84,9 @@ jobs:
               with:
                   node-version: "14"
                   cache: "npm"
+            - name: npm install
+              if: ${{ steps.release.outputs.release_created }}
+              run: npm ci --silent
             - name: vsce package
               if: ${{ steps.release.outputs.release_created }}
               run: npx vsce package -o vscode-neovim-${{steps.release.outputs.tag_name}}.vsix
