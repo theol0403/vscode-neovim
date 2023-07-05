@@ -1347,7 +1347,7 @@
         "@types/mocha": "^9.1.1",
         "@types/msgpack-lite": "^0.1.7",
         "@types/node": "^18.0.6",
-        "@types/vscode": "^1.71.0",
+        "@types/vscode": "^1.79.1",
         "@typescript-eslint/eslint-plugin": "^5.30.7",
         "@typescript-eslint/parser": "^5.30.7",
         "@vscode/test-electron": "^2.1.5",
