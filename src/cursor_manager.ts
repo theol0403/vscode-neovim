@@ -180,17 +180,10 @@ export class CursorManager
                 docPromises.then(() => {
                     try {
                         this.logger.debug(`${LOG_PREFIX}: Waiting document change completion done, gridId: ${gridId}`);
-                        const finalCol = calculateEditorColFromVimScreenCol(
-                            editor.document.lineAt(cursorPos.line).text,
-                            cursorPos.col,
-                            // !For cursor updates tab is always counted as 1 col
-                            cursorPos.isByteCol ? 1 : (editor.options.tabSize as number),
-                            cursorPos.isByteCol,
-                        );
-                        this.neovimCursorPosition.set(editor, new Position(cursorPos.line, finalCol));
+                        this.neovimCursorPosition.set(editor, new Position(cursorPos.line, cursorPos.col));
                         // !Often, especially with complex multi-command operations, neovim sends multiple cursor updates in multiple batches
                         // !To not mess the cursor, try to debounce the update
-                        this.getDebouncedUpdateCursorPos(editor)(editor, cursorPos.line, finalCol);
+                        this.getDebouncedUpdateCursorPos(editor)(editor, cursorPos.line, cursorPos.col);
                     } catch (e) {
                         this.logger.warn(`${LOG_PREFIX}: ${(e as Error).message}`);
                     }
