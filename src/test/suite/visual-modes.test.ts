@@ -32,7 +32,7 @@ describe("Visual modes test", () => {
         await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
         await wait();
 
-        await sendVSCodeKeys("w");
+        await sendVSCodeKeys("w", 1000);
         await assertContent(
             {
                 cursor: [0, 5],
