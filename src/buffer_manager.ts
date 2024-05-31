@@ -615,7 +615,7 @@ export class BufferManager implements Disposable {
             vim.api.nvim_buf_set_name(bufId, bufname)
             vim.api.nvim_buf_set_option(bufId, "modifiable", not isExternalDoc)
             -- force nofile, just in case if the buffer was created externally
-            vim.api.nvim_buf_set_option(bufId, "buftype", "nofile")
+            vim.api.nvim_buf_set_option(bufId, "buftype", "acwrite")
             vim.api.nvim_buf_set_option(bufId, "buflisted", true)
         `,
             [

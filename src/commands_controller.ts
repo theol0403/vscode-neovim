@@ -1,9 +1,13 @@
-import vscode, { Disposable, commands } from "vscode";
+import vscode, { Disposable, Uri, commands } from "vscode";
 
 import { config } from "./config";
 import { eventBus } from "./eventBus";
 import { MainController } from "./main_controller";
 import { disposeAll } from "./utils";
+import actions from "./actions";
+import { createLogger } from "./logger";
+
+const logger = createLogger("Commands");
 
 export class CommandsController implements Disposable {
     private disposables: Disposable[] = [];
@@ -22,6 +26,7 @@ export class CommandsController implements Disposable {
             eventBus.on("scroll", ([by, to]) => this.scrollPage(by, to)),
             eventBus.on("scroll-line", ([to]) => this.scrollLine(to)),
         );
+        actions.add("save-file", (uri, bang) => this.saveFile(uri, bang));
     }
 
     public dispose(): void {
@@ -81,5 +86,10 @@ export class CommandsController implements Disposable {
                 ),
             ];
         }
+    };
+
+    private saveFile = async (uri: string, bang: boolean): Promise<void> => {
+        logger.debug("saveFile", uri, bang);
+        await vscode.workspace.save(Uri.parse(uri));
     };
 }
